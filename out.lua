@@ -55,7 +55,7 @@ local function main()
 			local parts = {}
 			local i = 0
 			for k,val in pairs(v) do
-				i += 1
+				i = 				i + 1
 				if i > 20 then parts[#parts+1]="..."; break end
 				local ks = type(k)=="string" and k or ("["..serArg(k,depth+1).."]")
 				parts[#parts+1] = ks.." = "..serArg(val, depth+1)
@@ -362,7 +362,7 @@ local function main()
 				end)
 
 				logRows[#logRows+1] = {inst=row}
-				y += 36
+				y = 				y + 36
 			end
 		end
 
@@ -667,7 +667,7 @@ local function main()
 				for _,inst in ipairs(root:GetDescendants()) do
 					if inst.Name:lower():find(name,1,true) then
 						println("  "..inst:GetFullName().." ["..inst.ClassName.."]")
-						count += 1
+						count = 						count + 1
 						if count >= 100 then println("  ... (limit 100)"); return end
 					end
 				end
@@ -704,7 +704,7 @@ local function main()
 					if cn=="RemoteEvent" or cn=="RemoteFunction"
 					or cn=="BindableEvent" or cn=="BindableFunction" then
 						println("  ["..cn.."] "..inst:GetFullName())
-						count += 1
+						count = 						count + 1
 					end
 				end
 			end)
@@ -850,7 +850,7 @@ local function main()
 					local pok, parent = pcall(function() return v.Parent end)
 					if pok and parent == nil then
 						println("  [nil parent] ["..v.ClassName.."] "..v.Name)
-						found += 1
+						found = 						found + 1
 						if found >= 50 then println("  ... (limit 50)"); break end
 					end
 				end
@@ -11983,7 +11983,7 @@ Main = (function()
 				local inst,depth=entry[1],entry[2]
 
 				-- Yield check -- prevents freeze every YIELD_EVERY instances
-				instCount+=1
+				instCount = 				instCount + 1
 				if instCount%YIELD_EVERY==0 then
 					task.wait()
 					-- Print progress every 500
@@ -12047,7 +12047,7 @@ Main = (function()
 				local cok,children=pcall(function() return inst:GetChildren() end)
 				if cok and children and depth<20 then
 					for i=#children,1,-1 do
-						si+=1; stack[si]={children[i],depth+1}
+						si = 						si + 1; stack[si]={children[i],depth+1}
 					end
 				end
 
@@ -12256,7 +12256,7 @@ Main = (function()
 				Font=Enum.Font.GothamBold,TextSize=11,
 				TextXAlignment=Enum.TextXAlignment.Left,Parent=f,
 			})
-			y+=22
+			y = 			y + 22
 		end
 
 		local function toggle(label,get,set)
@@ -12283,7 +12283,7 @@ Main = (function()
 			end
 			refresh()
 			btn.MouseButton1Click:Connect(function() set(not get()); refresh() end)
-			y+=30
+			y = 			y + 30
 		end
 
 		section("Explorer")
@@ -12330,7 +12330,7 @@ Main = (function()
 				Settings.RemoteSpy.AutoStart=v
 			end)
 
-		y+=4
+		y = 		y + 4
 		local savebtn=createSimple("TextButton",{
 			Size=UDim2.new(1,-16,0,30),Position=UDim2.new(0,8,0,y),
 			BackgroundColor3=Color3.fromRGB(50,120,210),BorderSizePixel=0,
