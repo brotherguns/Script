@@ -11757,7 +11757,7 @@ Main = (function()
 
 		-- Hard cap -- bail if the game is massive
 		local INST_LIMIT  = math.huge
-		local YIELD_EVERY = 20    -- task.wait() every N instances processed
+		local YIELD_EVERY = 10    -- task.wait() every N instances (lower = smoother on mobile)
 		local instCount   = 0
 		local limitHit    = false
 
@@ -11885,11 +11885,29 @@ Main = (function()
 			else return "["..t.."]" end
 		end
 
-		-- -- Output buffer -----------------------------------------------
+		-- -- Output buffer (chunked flush to avoid memory crash on mobile) --
 		local buf={}
-		local function w(s)   buf[#buf+1]=(s or "") end
+		local bufSize=0
+		local FLUSH_EVERY=300  -- flush to file every N lines
+		local txtFileReady=false
+		local function flushBuf()
+			if #buf==0 then return end
+			local chunk=table.concat(buf,"\n").."\n"
+			buf={}; bufSize=0
+			if not txtFileReady then
+				pcall(env.writefile, txtFile, chunk)
+				txtFileReady=true
+			else
+				pcall(env.appendfile, txtFile, chunk)
+			end
+		end
+		local function w(s)
+			buf[#buf+1]=(s or "")
+			bufSize=bufSize+1
+			if bufSize>=FLUSH_EVERY then flushBuf() end
+		end
 		local function sep()  w(("-"):rep(60)) end
-		local function hdr(t) w(("?"):rep(60)); w("  "..t); w(("?"):rep(60)) end
+		local function hdr(t) w(("="):rep(60)); w("  "..t); w(("="):rep(60)) end
 
 		-- -- Summaries ---------------------------------------------------
 		local remotes={}; local scripts={}
@@ -12065,7 +12083,7 @@ Main = (function()
 		w("  Tick    : "..TS)
 		w("  Executor: "..tostring(Main.Executor or "unknown"))
 		w("  Limit   : "..INST_LIMIT.." instances")
-		w(("?"):rep(60)); w("")
+		w(("="):rep(60)); w("")
 
 		for _,svcName in ipairs(SERVICES) do
 			local ok,svc=pcall(function() return game:GetService(svcName) end)
@@ -12170,13 +12188,13 @@ Main = (function()
 			end
 		end
 
-		w(("?"):rep(60))
+		w(("="):rep(60))
 		w(("  DONE | instances:%d | lines:%d | remotes:%d | scripts:%d"):format(
-			instCount,#buf,#remotes,#scripts))
-		w(("?"):rep(60))
+			instCount,bufSize+#buf,#remotes,#scripts))
+		w(("="):rep(60))
 
 		task.wait() -- final yield before write
-		env.writefile(txtFile,table.concat(buf,"\n"))
+		flushBuf() -- flush remaining lines
 
 		print(("[Dex Dump] ? %d instances | %d lines | %d remotes | %d scripts"):format(
 			instCount,#buf,#remotes,#scripts))
