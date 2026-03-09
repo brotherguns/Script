@@ -12067,11 +12067,14 @@ Main = (function()
 				-- Attributes (only dump if any exist -- fast check)
 				dumpAttrs(inst,pad)
 
-				-- Push children onto stack in reverse so first child is processed first
+				-- Push children -- skip descending into pure geometry parts
+				local skipChildren = (cn=="Part" or cn=="MeshPart" or cn=="UnionOperation"
+					or cn=="CornerWedgePart" or cn=="WedgePart" or cn=="TrussPart")
+					and depth > 4
 				local cok,children=pcall(function() return inst:GetChildren() end)
-				if cok and children and depth<20 then
+				if cok and children and depth<20 and not skipChildren then
 					for i=#children,1,-1 do
-						si = 						si + 1; stack[si]={children[i],depth+1}
+						si = si + 1; stack[si]={children[i],depth+1}
 					end
 				end
 
@@ -12088,16 +12091,70 @@ Main = (function()
 		w("  JobId   : "..tostring(game.JobId))
 		w("  Tick    : "..TS)
 		w("  Executor: "..tostring(Main.Executor or "unknown"))
-		w("  Limit   : "..INST_LIMIT.." instances")
 		w(("="):rep(60)); w("")
 
-		for _,svcName in ipairs(SERVICES) do
-			local ok,svc=pcall(function() return game:GetService(svcName) end)
-			if ok and svc then
-				w("[SERVICE] "..svcName)
-				walk(svc)
-				if limitHit then break end
-				task.wait() -- yield between services
+		-- ReplicatedStorage: walk everything (remotes + modules live here)
+		local ok,RS2=pcall(function() return game:GetService("ReplicatedStorage") end)
+		if ok and RS2 then
+			w("[SERVICE] ReplicatedStorage")
+			walk(RS2)
+			task.wait()
+		end
+
+		-- Workspace: ONLY walk named important folders, skip giant build geometry
+		local ok2,WS=pcall(function() return game:GetService("Workspace") end)
+		if ok2 and WS then
+			w("[SERVICE] Workspace (targeted)")
+			w("  [A] XRayCharge="..(pcall(function() return WS:GetAttribute("XRayCharge") end) and WS:GetAttribute("XRayCharge") or "?"))
+			local WS_TARGETS = {
+				"Interactables","NPCs","Mops","Events","Entities",
+				"DeveloperProducts","Lights","PSXReplicated",
+			}
+			-- Also dump workspace attributes
+			dumpAttrs(WS,"")
+			for _,fname in ipairs(WS_TARGETS) do
+				local f=WS:FindFirstChild(fname)
+				if f then
+					w("  [Folder] "..fname)
+					walk(f)
+					task.wait()
+				end
+			end
+			-- Walk any player characters in workspace for scripts only
+			for _,ch in ipairs(WS:GetChildren()) do
+				local ok3,cn3=pcall(function() return ch.ClassName end)
+				if ok3 and cn3=="Model" then
+					-- Only descend into character models for their scripts/guis
+					for _,v in ipairs(ch:GetDescendants()) do
+						local ok4,cn4=pcall(function() return v.ClassName end)
+						if ok4 and (cn4=="LocalScript" or cn4=="Script" or cn4=="ModuleScript") then
+							local full4=""; pcall(function() full4=v:GetFullName() end)
+							w("  [CharScript] "..full4)
+							if Settings.Dump.SaveScripts then
+								local fp,chars=saveScript(v)
+								if fp then w("    [src:"..fp.." "..chars.."c]") end
+							end
+						end
+					end
+				end
+			end
+			task.wait()
+		end
+
+		-- Players: LocalPlayer scripts/gui only, skip other players
+		local ok3,PLRS=pcall(function() return game:GetService("Players") end)
+		if ok3 and PLRS then
+			local lp=PLRS.LocalPlayer
+			if lp then
+				w("[SERVICE] Players (LocalPlayer only)")
+				-- Dump player attributes
+				dumpAttrs(lp,"  ")
+				-- Walk PlayerGui and PlayerScripts (the useful bits)
+				local LP_TARGETS = {"PlayerGui","PlayerScripts","Backpack"}
+				for _,tname in ipairs(LP_TARGETS) do
+					local t2=lp:FindFirstChild(tname)
+					if t2 then walk(t2); task.wait() end
+				end
 			end
 		end
 
