@@ -11756,7 +11756,7 @@ Main = (function()
 		pcall(env.makefolder, sDir)
 
 		-- Hard cap -- bail if the game is massive
-		local INST_LIMIT  = 4000
+		local INST_LIMIT  = 25000
 		local YIELD_EVERY = 40    -- task.wait() every N instances processed
 		local instCount   = 0
 		local limitHit    = false
