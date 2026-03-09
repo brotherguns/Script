@@ -26,7 +26,7 @@ end
 local function main()
 	local RemoteSpy = {}
 
-	-- ── Serializer ────────────────────────────────────────────────────────
+	-- -- Serializer --------------------------------------------------------
 	local MAX_DEPTH = 4
 	local function serArg(v, depth)
 		depth = depth or 0
@@ -72,7 +72,7 @@ local function main()
 		return table.concat(parts, ", ")
 	end
 
-	-- ── Log storage ───────────────────────────────────────────────────────
+	-- -- Log storage -------------------------------------------------------
 	local logs = {}
 	local MAX_LOGS = 500
 	local logCallbacks = {}
@@ -88,7 +88,7 @@ local function main()
 		logCallbacks[#logCallbacks+1] = cb
 	end
 
-	-- ── Hook tracking ─────────────────────────────────────────────────────
+	-- -- Hook tracking -----------------------------------------------------
 	local hooked = {}
 	local originalFuncs = {}
 	local blocklist = {}      -- set of remote names to ignore
@@ -97,7 +97,7 @@ local function main()
 	RemoteSpy.Blocklist = blocklist
 	RemoteSpy.SetAllowlist = function(names) allowlist = names end
 
-	-- ── Core hook ─────────────────────────────────────────────────────────
+	-- -- Core hook ---------------------------------------------------------
 	local hookfn = hookfunction or replaceclosure or (syn and syn.hookfunction)
 
 	local function shouldLog(name)
@@ -203,7 +203,7 @@ local function main()
 		end
 	end
 
-	-- ── Scan existing remotes ─────────────────────────────────────────────
+	-- -- Scan existing remotes ---------------------------------------------
 	local function scanAndHook(root)
 		pcall(function()
 			for _,inst in ipairs(root:GetDescendants()) do
@@ -267,7 +267,7 @@ local function main()
 		print("[RemoteSpy] Saved "..#logs.." logs")
 	end
 
-	-- ── Window UI ─────────────────────────────────────────────────────────
+	-- -- Window UI ---------------------------------------------------------
 	local window
 	local listFrame
 	local logRows = {}
@@ -399,7 +399,7 @@ local function main()
 			return b
 		end
 
-		local activeBtn = mkBtn("● Active",4,70,Color3.fromRGB(50,160,50))
+		local activeBtn = mkBtn("* Active",4,70,Color3.fromRGB(50,160,50))
 		local clearBtn  = mkBtn("Clear",78,50)
 		local saveBtn   = mkBtn("Save",132,50)
 
@@ -423,7 +423,7 @@ local function main()
 		local paused = false
 		activeBtn.MouseButton1Click:Connect(function()
 			paused = not paused
-			activeBtn.Text = paused and "○ Paused" or "● Active"
+			activeBtn.Text = paused and "o Paused" or "* Active"
 			activeBtn.BackgroundColor3 = paused and Color3.fromRGB(160,50,50) or Color3.fromRGB(50,160,50)
 		end)
 		clearBtn.MouseButton1Click:Connect(function()
@@ -472,6 +472,7 @@ return {
 	Main           = main
 }
 
+
 end,
 ["Terminal"] = function()
 --[[
@@ -499,14 +500,14 @@ end
 local function main()
 	local Terminal = {}
 
-	-- ── State ────────────────────────────────────────────────────────────
+	-- -- State ------------------------------------------------------------
 	local cwd = game  -- current working directory (Instance)
 	local history = {}
 	local historyIdx = 0
 	local outputLines = {}
 	local MAX_LINES = 300
 
-	-- ── Value serializer ─────────────────────────────────────────────────
+	-- -- Value serializer -------------------------------------------------
 	local function sv(v)
 		local t = typeof(v)
 		if t=="string"  then return '"'..v:sub(1,60)..'"'
@@ -521,7 +522,7 @@ local function main()
 		else return "["..t.."]" end
 	end
 
-	-- ── Output ────────────────────────────────────────────────────────────
+	-- -- Output ------------------------------------------------------------
 	local outputCallback = nil
 
 	local function println(text, color)
@@ -537,7 +538,7 @@ local function main()
 	local function printInfo(t) println(t, Color3.fromRGB(150,200,255)) end
 	local function printWarn(t) println("WARN: "..t, Color3.fromRGB(255,200,60)) end
 
-	-- ── Path resolver ─────────────────────────────────────────────────────
+	-- -- Path resolver -----------------------------------------------------
 	local function resolvePath(path)
 		if path == nil or path == "" then return cwd end
 		if path == "/" then return game end
@@ -570,13 +571,13 @@ local function main()
 		return target
 	end
 
-	-- ── Commands ──────────────────────────────────────────────────────────
+	-- -- Commands ----------------------------------------------------------
 	local commands = {}
 
 	commands.help = {
 		desc = "List commands",
 		run = function(args)
-			println("━━━ DEX TERMINAL COMMANDS ━━━", Color3.fromRGB(255,200,60))
+			println("=== DEX TERMINAL COMMANDS ===", Color3.fromRGB(255,200,60))
 			local sorted = {}
 			for k,v in pairs(commands) do sorted[#sorted+1]={k,v.desc} end
 			table.sort(sorted,function(a,b) return a[1]<b[1] end)
@@ -587,7 +588,7 @@ local function main()
 	}
 
 	commands.ls = {
-		desc = "ls [path] — list children",
+		desc = "ls [path] -- list children",
 		run = function(args)
 			local target,err = resolvePath(args[1])
 			if not target then printErr(err or "bad path"); return end
@@ -609,24 +610,24 @@ local function main()
 	}
 
 	commands.cd = {
-		desc = "cd <path> — change directory",
+		desc = "cd <path> -- change directory",
 		run = function(args)
 			local target,err = resolvePath(args[1])
 			if not target then printErr(err or "bad path"); return end
 			cwd = target
-			printOk("cwd → "..cwd:GetFullName())
+			printOk("cwd -> "..cwd:GetFullName())
 		end
 	}
 
 	commands.pwd = {
-		desc = "pwd — print current path",
+		desc = "pwd -- print current path",
 		run = function(args)
 			printInfo(cwd:GetFullName())
 		end
 	}
 
 	commands.cat = {
-		desc = "cat <path> — show script source or value",
+		desc = "cat <path> -- show script source or value",
 		run = function(args)
 			local target,err = resolvePath(args[1])
 			if not target then printErr(err or "bad path"); return end
@@ -644,7 +645,7 @@ local function main()
 				local lines = src:split("\n")
 				for i,line in ipairs(lines) do
 					if i>200 then println("... ("..(#lines-200).." more lines)"); break end
-					println(string.format("%4d │ %s",i,line), Color3.fromRGB(173,241,149))
+					println(string.format("%4d | %s",i,line), Color3.fromRGB(173,241,149))
 				end
 			else
 				local ok,val = pcall(function() return target.Value end)
@@ -655,7 +656,7 @@ local function main()
 	}
 
 	commands.find = {
-		desc = "find <name> [path] — find descendants by name",
+		desc = "find <name> [path] -- find descendants by name",
 		run = function(args)
 			if not args[1] then printErr("Usage: find <name> [path]"); return end
 			local root,err = resolvePath(args[2])
@@ -676,7 +677,7 @@ local function main()
 	}
 
 	commands.attr = {
-		desc = "attr [path] — show attributes",
+		desc = "attr [path] -- show attributes",
 		run = function(args)
 			local target,err = resolvePath(args[1])
 			if not target then printErr(err or "bad path"); return end
@@ -692,7 +693,7 @@ local function main()
 	}
 
 	commands.remotes = {
-		desc = "remotes [path] — list all remotes under path",
+		desc = "remotes [path] -- list all remotes under path",
 		run = function(args)
 			local root,err = resolvePath(args[1])
 			if not root then root = game end
@@ -712,7 +713,7 @@ local function main()
 	}
 
 	commands.props = {
-		desc = "props [path] — show key properties",
+		desc = "props [path] -- show key properties",
 		run = function(args)
 			local target,err = resolvePath(args[1])
 			if not target then printErr(err or "bad path"); return end
@@ -741,7 +742,7 @@ local function main()
 	}
 
 	commands.exec = {
-		desc = "exec <lua code> — execute lua (uses loadstring)",
+		desc = "exec <lua code> -- execute lua (uses loadstring)",
 		run = function(args)
 			if not args[1] then printErr("Usage: exec <code>"); return end
 			local code = table.concat(args," ")
@@ -752,7 +753,7 @@ local function main()
 				if #res > 0 then
 					local parts = {}
 					for _,v in ipairs(res) do parts[#parts+1]=sv(v) end
-					printOk("→ "..table.concat(parts,", "))
+					printOk("-> "..table.concat(parts,", "))
 				end
 			end)
 			if not ok then printErr(tostring(err)) end
@@ -760,7 +761,7 @@ local function main()
 	}
 
 	commands.tp = {
-		desc = "tp <path> — teleport to instance position",
+		desc = "tp <path> -- teleport to instance position",
 		run = function(args)
 			local target,err = resolvePath(args[1])
 			if not target then printErr(err or "bad path"); return end
@@ -780,7 +781,7 @@ local function main()
 	}
 
 	commands.kill = {
-		desc = "kill [path] — destroy instance (careful!)",
+		desc = "kill [path] -- destroy instance (careful!)",
 		run = function(args)
 			local target,err = resolvePath(args[1])
 			if not target then printErr(err or "bad path"); return end
@@ -792,7 +793,7 @@ local function main()
 	}
 
 	commands.copy = {
-		desc = "copy <path> — copy full path to clipboard",
+		desc = "copy <path> -- copy full path to clipboard",
 		run = function(args)
 			local target,err = resolvePath(args[1])
 			if not target then printErr(err or "bad path"); return end
@@ -803,7 +804,7 @@ local function main()
 	}
 
 	commands.clear = {
-		desc = "clear — clear terminal output",
+		desc = "clear -- clear terminal output",
 		run = function(args)
 			for i=#outputLines,1,-1 do outputLines[i]=nil end
 			if outputCallback then outputCallback(nil) end -- signal clear
@@ -811,7 +812,7 @@ local function main()
 	}
 
 	commands.services = {
-		desc = "services — list all GetService services",
+		desc = "services -- list all GetService services",
 		run = function(args)
 			local svcNames = {
 				"Workspace","Players","ReplicatedStorage","ReplicatedFirst",
@@ -838,7 +839,7 @@ local function main()
 	}
 
 	commands.gc = {
-		desc = "gc — scan GC for hidden instances",
+		desc = "gc -- scan GC for hidden instances",
 		run = function(args)
 			if not env.getgc then printErr("getgc not available"); return end
 			local ok,gc = pcall(env.getgc, true)
@@ -858,7 +859,7 @@ local function main()
 		end
 	}
 
-	-- ── Parser ────────────────────────────────────────────────────────────
+	-- -- Parser ------------------------------------------------------------
 	local function parseInput(input)
 		local parts = {}
 		-- Handle quoted strings
@@ -910,7 +911,7 @@ local function main()
 
 	Terminal.GetLines = function() return outputLines end
 
-	-- ── Window ────────────────────────────────────────────────────────────
+	-- -- Window ------------------------------------------------------------
 	local window = nil
 	local outputScrollFrame = nil
 	local rowPool = {}
@@ -1000,7 +1001,7 @@ local function main()
 		end)
 
 		-- Print startup message
-		println("DEX Terminal — type 'help' for commands", Color3.fromRGB(255,220,60))
+		println("DEX Terminal -- type 'help' for commands", Color3.fromRGB(255,220,60))
 		println("cwd: "..cwd:GetFullName(), Color3.fromRGB(150,200,255))
 		for _,line in ipairs(outputLines) do
 			addOutputLine(line)
@@ -1046,6 +1047,7 @@ return {
 	InitAfterMain  = initAfterMain,
 	Main           = main
 }
+
 
 end,
 ["Lib"] = function()
@@ -6795,6 +6797,7 @@ if gethsfuncs then
 else
 	return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 end
+
 end,
 ["Explorer"] = function()
 --[[
@@ -9025,6 +9028,7 @@ if gethsfuncs then
 else
 	return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 end
+
 end,
 ["ScriptViewer"] = function()
 --[[
@@ -9145,6 +9149,7 @@ if gethsfuncs then
 else
 	return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 end
+
 end,
 ["Properties"] = function()
 --[[
@@ -11054,21 +11059,22 @@ if gethsfuncs then
 else
 	return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 end
+
 end,
 }
 --[[
-	New Dex — Enhanced Edition
+	New Dex -- Enhanced Edition
 	Original by Moon | Extended build
 	
 	Added in this build:
-	  • Ultimate DumpGame — full API property dump, attributes,
+	  * Ultimate DumpGame -- full API property dump, attributes,
 	    script decompile/save, GC scan, nil instances, remotes summary,
 	    upvalues/constants (opt-in), loadedmodules, player/workspace attrs
-	  • RemoteSpy — hooks all RE/RF/BE/BF, live log, filter, clipboard copy
-	  • Terminal — ls/cd/cat/find/attr/remotes/props/exec/tp/gc/services/kill
-	  • Click-to-Select — click 3D part → selects in Explorer
-	  • Settings GUI — toggle all new features, save to DexSettings.json
-	  • Save Instance — binary saveinstance alongside text dump
+	  * RemoteSpy -- hooks all RE/RF/BE/BF, live log, filter, clipboard copy
+	  * Terminal -- ls/cd/cat/find/attr/remotes/props/exec/tp/gc/services/kill
+	  * Click-to-Select -- click 3D part -> selects in Explorer
+	  * Settings GUI -- toggle all new features, save to DexSettings.json
+	  * Save Instance -- binary saveinstance alongside text dump
 ]]
 
 -- Main vars
@@ -11738,9 +11744,9 @@ Main = (function()
 		end
 	end
 
-	-- ╔══════════════════════════════════════════════════════════════════╗
-	-- ║              ULTIMATE DUMP — Best & most complete                ║
-	-- ╚══════════════════════════════════════════════════════════════════╝
+	-- ????????????????????????????????????????????????????????????????????
+	-- ?              ULTIMATE DUMP -- Best & most complete                ?
+	-- ????????????????????????????????????????????????????????????????????
 	Main.DumpGame = function()
 		if not env.writefile then warn("[Dex] writefile unavailable"); return end
 
@@ -11749,13 +11755,13 @@ Main = (function()
 		local sDir    = "dex/saved/scripts_"..TS
 		pcall(env.makefolder, sDir)
 
-		-- Hard cap — bail if the game is massive
+		-- Hard cap -- bail if the game is massive
 		local INST_LIMIT  = 4000
 		local YIELD_EVERY = 40    -- task.wait() every N instances processed
 		local instCount   = 0
 		local limitHit    = false
 
-		-- ── Noise: skip entire subtree for these classes ────────────────
+		-- -- Noise: skip entire subtree for these classes ----------------
 		-- These are pure rig/engine internals with zero useful info
 		local SKIP_CLASS = {
 			-- Rig joints & mesh
@@ -11856,7 +11862,7 @@ Main = (function()
 			"Lighting",
 		}
 
-		-- ── Value serializer ────────────────────────────────────────────
+		-- -- Value serializer --------------------------------------------
 		local function sv(val)
 			local t=typeof(val)
 			if t=="string" then
@@ -11879,16 +11885,16 @@ Main = (function()
 			else return "["..t.."]" end
 		end
 
-		-- ── Output buffer ───────────────────────────────────────────────
+		-- -- Output buffer -----------------------------------------------
 		local buf={}
 		local function w(s)   buf[#buf+1]=(s or "") end
-		local function sep()  w(("─"):rep(60)) end
-		local function hdr(t) w(("═"):rep(60)); w("  "..t); w(("═"):rep(60)) end
+		local function sep()  w(("-"):rep(60)) end
+		local function hdr(t) w(("?"):rep(60)); w("  "..t); w(("?"):rep(60)) end
 
-		-- ── Summaries ───────────────────────────────────────────────────
+		-- -- Summaries ---------------------------------------------------
 		local remotes={}; local scripts={}
 
-		-- ── API prop cache: class → filtered prop list ──────────────────
+		-- -- API prop cache: class -> filtered prop list ------------------
 		-- Computed once per class, reused for every instance of that class
 		local propCache={}
 		local function getProps(cn)
@@ -11909,7 +11915,7 @@ Main = (function()
 			return filtered
 		end
 
-		-- ── Script save ─────────────────────────────────────────────────
+		-- -- Script save -------------------------------------------------
 		local function saveScript(inst)
 			local src=""
 			pcall(function() src=inst.Source end)
@@ -11924,7 +11930,7 @@ Main = (function()
 			return fp,#src
 		end
 
-		-- ── Attribute dump ──────────────────────────────────────────────
+		-- -- Attribute dump ----------------------------------------------
 		local function dumpAttrs(inst,pad)
 			local ok,attrs=pcall(function() return inst:GetAttributes() end)
 			if not ok or not attrs then return end
@@ -11933,7 +11939,7 @@ Main = (function()
 			end
 		end
 
-		-- ── Property dump ───────────────────────────────────────────────
+		-- -- Property dump -----------------------------------------------
 		local function dumpProps(inst,pad,cn)
 			-- Lite-mode: only dump the short list for noisy classes
 			local lite=LITE_PROPS[cn]
@@ -11965,7 +11971,7 @@ Main = (function()
 			end
 		end
 
-		-- ── Instance walker (iterative, not recursive, so no stack overflow) ──
+		-- -- Instance walker (iterative, not recursive, so no stack overflow) --
 		-- Uses explicit stack to avoid Lua call-stack blowout on deep trees
 		local yieldTimer=tick()
 		local function walk(root)
@@ -11976,7 +11982,7 @@ Main = (function()
 				local entry=stack[si]; stack[si]=nil; si-=1
 				local inst,depth=entry[1],entry[2]
 
-				-- Yield check — prevents freeze every YIELD_EVERY instances
+				-- Yield check -- prevents freeze every YIELD_EVERY instances
 				instCount+=1
 				if instCount%YIELD_EVERY==0 then
 					task.wait()
@@ -11990,8 +11996,8 @@ Main = (function()
 				if instCount>INST_LIMIT then
 					if not limitHit then
 						limitHit=true
-						w("  !! LIMIT "..INST_LIMIT.." instances reached — stopping tree walk")
-						print("[Dex Dump] Instance limit hit ("..INST_LIMIT..") — stopping")
+						w("  !! LIMIT "..INST_LIMIT.." instances reached -- stopping tree walk")
+						print("[Dex Dump] Instance limit hit ("..INST_LIMIT..") -- stopping")
 					end
 					break
 				end
@@ -12028,7 +12034,7 @@ Main = (function()
 						local fp,chars=saveScript(inst)
 						if fp then
 							w(pad.."  [src:"..fp.." "..chars.."c]")
-							scripts[#scripts+1]=full.." → "..fp
+							scripts[#scripts+1]=full.." -> "..fp
 						else
 							w(pad.."  [src:unavailable]")
 						end
@@ -12038,7 +12044,7 @@ Main = (function()
 				-- Properties
 				dumpProps(inst,pad,cn)
 
-				-- Attributes (only dump if any exist — fast check)
+				-- Attributes (only dump if any exist -- fast check)
 				dumpAttrs(inst,pad)
 
 				-- Push children onto stack in reverse so first child is processed first
@@ -12056,14 +12062,14 @@ Main = (function()
 			end
 		end
 
-		-- ── Build ───────────────────────────────────────────────────────
+		-- -- Build -------------------------------------------------------
 		hdr("DEX DUMP")
 		w("  PlaceId : "..tostring(game.PlaceId))
 		w("  JobId   : "..tostring(game.JobId))
 		w("  Tick    : "..TS)
 		w("  Executor: "..tostring(Main.Executor or "unknown"))
 		w("  Limit   : "..INST_LIMIT.." instances")
-		w(("═"):rep(60)); w("")
+		w(("?"):rep(60)); w("")
 
 		for _,svcName in ipairs(SERVICES) do
 			local ok,svc=pcall(function() return game:GetService(svcName) end)
@@ -12087,7 +12093,7 @@ Main = (function()
 			end
 		end
 
-		-- GC hidden instances (simple list only — no walking subtrees to avoid explosion)
+		-- GC hidden instances (simple list only -- no walking subtrees to avoid explosion)
 		if not limitHit and Settings.Dump.ScanGC and env.getgc then
 			local ok,gc=pcall(env.getgc,true)
 			if ok and gc then
@@ -12126,7 +12132,7 @@ Main = (function()
 			end
 		end
 
-		-- Remote summary (sorted — most useful section for scripting)
+		-- Remote summary (sorted -- most useful section for scripting)
 		if #remotes>0 then
 			hdr("REMOTE SUMMARY ("..#remotes..")")
 			table.sort(remotes)
@@ -12168,20 +12174,20 @@ Main = (function()
 			end
 		end
 
-		w(("═"):rep(60))
+		w(("?"):rep(60))
 		w(("  DONE | instances:%d | lines:%d | remotes:%d | scripts:%d"):format(
 			instCount,#buf,#remotes,#scripts))
-		w(("═"):rep(60))
+		w(("?"):rep(60))
 
 		task.wait() -- final yield before write
 		env.writefile(txtFile,table.concat(buf,"\n"))
 
-		print(("[Dex Dump] ✓ %d instances | %d lines | %d remotes | %d scripts"):format(
+		print(("[Dex Dump] ? %d instances | %d lines | %d remotes | %d scripts"):format(
 			instCount,#buf,#remotes,#scripts))
-		print("[Dex Dump] → "..txtFile)
+		print("[Dex Dump] -> "..txtFile)
 	end
 
-	-- ── Click-to-Select ────────────────────────────────────────────────
+	-- -- Click-to-Select ------------------------------------------------
 	Main.InitClickToSelect = function()
 		if Main.ClickToSelectConn then Main.ClickToSelectConn:Disconnect() end
 		if not Settings.Explorer.ClickToSelect then return end
@@ -12205,7 +12211,7 @@ Main = (function()
 		end)
 	end
 
-	-- ── Settings window ─────────────────────────────────────────────────
+	-- -- Settings window -------------------------------------------------
 	Main.OpenSettingsGui = function()
 		if Main.SettingsGui then
 			Main.SettingsGui.Enabled=not Main.SettingsGui.Enabled; return
@@ -12229,13 +12235,13 @@ Main = (function()
 		Instance.new("UICorner",tbar).CornerRadius=UDim.new(0,8)
 		createSimple("TextLabel",{
 			Size=UDim2.new(1,-40,1,0),BackgroundTransparency=1,
-			Text="⚙  Dex Settings",TextColor3=Color3.fromRGB(255,255,255),
+			Text="?  Dex Settings",TextColor3=Color3.fromRGB(255,255,255),
 			Font=Enum.Font.GothamBold,TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,
 			Position=UDim2.new(0,12,0,0),Parent=tbar,
 		})
 		local xbtn=createSimple("TextButton",{
 			Size=UDim2.new(0,26,0,26),Position=UDim2.new(1,-30,0,4),
-			BackgroundColor3=Color3.fromRGB(180,50,50),Text="✕",
+			BackgroundColor3=Color3.fromRGB(180,50,50),Text="?",
 			TextColor3=Color3.fromRGB(255,255,255),Font=Enum.Font.GothamBold,
 			TextSize=12,BorderSizePixel=0,Parent=tbar,
 		})
@@ -12250,7 +12256,7 @@ Main = (function()
 			})
 			createSimple("TextLabel",{
 				Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,
-				Text="── "..name.." ──",TextColor3=Color3.fromRGB(100,180,255),
+				Text="-- "..name.." --",TextColor3=Color3.fromRGB(100,180,255),
 				Font=Enum.Font.GothamBold,TextSize=11,
 				TextXAlignment=Enum.TextXAlignment.Left,Parent=f,
 			})
@@ -12332,14 +12338,14 @@ Main = (function()
 		local savebtn=createSimple("TextButton",{
 			Size=UDim2.new(1,-16,0,30),Position=UDim2.new(0,8,0,y),
 			BackgroundColor3=Color3.fromRGB(50,120,210),BorderSizePixel=0,
-			Text="💾  Save Settings",TextColor3=Color3.fromRGB(255,255,255),
+			Text="?  Save Settings",TextColor3=Color3.fromRGB(255,255,255),
 			Font=Enum.Font.GothamBold,TextSize=13,Parent=frame,
 		})
 		Instance.new("UICorner",savebtn).CornerRadius=UDim.new(0,6)
 		savebtn.MouseButton1Click:Connect(function()
 			Main.SaveSettings()
-			savebtn.Text="✓ Saved!"
-			task.delay(1.5,function() savebtn.Text="💾  Save Settings" end)
+			savebtn.Text="? Saved!"
+			task.delay(1.5,function() savebtn.Text="?  Save Settings" end)
 		end)
 	end
 
@@ -12390,12 +12396,12 @@ Main = (function()
 			end
 		end)
 
-		-- ── Core apps ───────────────────────────────────────────────────
+		-- -- Core apps ---------------------------------------------------
 		Main.CreateApp({Name="Explorer",   IconMap=Main.LargeIcons,Icon="Explorer",   Open=true,Window=Explorer.Window})
 		Main.CreateApp({Name="Properties", IconMap=Main.LargeIcons,Icon="Properties", Open=true,Window=Properties.Window})
 		Main.CreateApp({Name="Script View",IconMap=Main.LargeIcons,Icon="Script_Viewer",Window=ScriptViewer.Window})
 
-		-- ── New apps ────────────────────────────────────────────────────
+		-- -- New apps ----------------------------------------------------
 		if RemoteSpy then
 			Main.CreateApp({
 				Name="Remote Spy",
@@ -12413,7 +12419,7 @@ Main = (function()
 			Main.CreateApp({Name="Terminal",IconMap=Main.MiscIcons,Icon="CallFunction",Window=Terminal.Window})
 		end
 
-		-- ── Dump (one-shot trigger) ──────────────────────────────────────
+		-- -- Dump (one-shot trigger) --------------------------------------
 		Main.CreateApp({
 			Name="Dump",
 			IconMap=Main.MiscIcons, Icon="Save",
@@ -12510,7 +12516,7 @@ Main = (function()
 			coroutine.wrap(function() RemoteSpy.Start() end)()
 		end
 
-		print("[Dex Enhanced "..Main.Version.."] Ready — PlaceId:"..tostring(game.PlaceId))
+		print("[Dex Enhanced "..Main.Version.."] Ready -- PlaceId:"..tostring(game.PlaceId))
 	end
 
 	return Main
