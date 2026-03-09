@@ -11792,6 +11792,12 @@ Main = (function()
 		-- Skip entire subtree if name matches
 		local SKIP_SUBTREE_NAME = {
 			Animate=true, RigAttachments=true, AvatarPartScaleType=true,
+			-- Skip entire character body subtrees (thousands of parts, no useful info)
+			HumanoidRootPart=true, LeftUpperArm=true, RightUpperArm=true,
+			LeftLowerArm=true, RightLowerArm=true, LeftHand=true, RightHand=true,
+			LeftUpperLeg=true, RightUpperLeg=true, LeftLowerLeg=true, RightLowerLeg=true,
+			LeftFoot=true, RightFoot=true, UpperTorso=true, LowerTorso=true,
+			Head=true,
 		}
 
 		-- Skip instance if its parent's class is one of these
@@ -11850,16 +11856,11 @@ Main = (function()
 
 		-- Only dump these services (client-visible only)
 		local SERVICES = {
-			"ReplicatedStorage",
-			"ReplicatedFirst",
-			"Workspace",
-			"Players",
-			"StarterGui",
-			"StarterPack",
-			"StarterPlayer",
-			"Teams",
-			"SoundService",
-			"Lighting",
+			"ReplicatedStorage",  -- remotes, modules, NPC data
+			"Workspace",          -- interactables, game objects
+			"Players",            -- player scripts (not starter duplicates)
+			-- StarterGui/StarterPlayer skipped: exact duplicates of PlayerGui/PlayerScripts
+			-- SoundService/Lighting/Teams skipped: no useful remotes or scripts
 		}
 
 		-- -- Value serializer --------------------------------------------
@@ -11888,7 +11889,7 @@ Main = (function()
 		-- -- Output buffer (chunked flush to avoid memory crash on mobile) --
 		local buf={}
 		local bufSize=0
-		local FLUSH_EVERY=300  -- flush to file every N lines
+		local FLUSH_EVERY=150  -- flush to file every N lines (lower = safer on mobile)
 		local txtFileReady=false
 		local function flushBuf()
 			if #buf==0 then return end
@@ -11940,6 +11941,7 @@ Main = (function()
 			if (src=="" or not src) and Settings.Dump.DecompileScripts and env.decompile then
 				local ok,dec=pcall(env.decompile,inst)
 				if ok and dec and dec~="" then src=dec end
+				task.wait() -- yield after each decompile (heavy op on mobile)
 			end
 			if not src or src=="" then return nil,0 end
 			local fn=inst:GetFullName():gsub("[%./%\\%s]","_")..".lua"
@@ -12024,6 +12026,10 @@ Main = (function()
 				local ok1,cn=pcall(function() return inst.ClassName end)
 				local ok2,nm=pcall(function() return inst.Name end)
 				local ok3,par=pcall(function() return inst.Parent end)
+				-- Skip character model subtrees under Players (just keep Scripts/Guis)
+				local isCharPart = ok3 and par and (cn=="Part" or cn=="MeshPart" or cn=="UnionOperation"
+					or cn=="Motor6D" or cn=="Attachment" or cn=="WeldConstraint")
+					and par.ClassName~="Model" and depth>3
 				local skipInst = (not ok1) or SKIP_CLASS[cn] or (not ok2) or SKIP_SUBTREE_NAME[nm]
 					or (ok3 and par and SKIP_IF_PARENT_CLASS[par.ClassName])
 				if not skipInst then
