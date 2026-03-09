@@ -12004,15 +12004,11 @@ Main = (function()
 
 				-- Class check
 				local ok1,cn=pcall(function() return inst.ClassName end)
-				if not ok1 then goto continue end
-				if SKIP_CLASS[cn] then goto continue end
-
 				local ok2,nm=pcall(function() return inst.Name end)
-				if not ok2 then goto continue end
-				if SKIP_SUBTREE_NAME[nm] then goto continue end
-
 				local ok3,par=pcall(function() return inst.Parent end)
-				if ok3 and par and SKIP_IF_PARENT_CLASS[par.ClassName] then goto continue end
+				local skipInst = (not ok1) or SKIP_CLASS[cn] or (not ok2) or SKIP_SUBTREE_NAME[nm]
+					or (ok3 and par and SKIP_IF_PARENT_CLASS[par.ClassName])
+				if not skipInst then
 
 				local pad=("  "):rep(depth)
 				local full=""; pcall(function() full=inst:GetFullName() end)
@@ -12058,7 +12054,7 @@ Main = (function()
 				-- Blank line between top-level service children
 				if depth==1 then w("") end
 
-				::continue::
+				end -- skipInst check
 			end
 		end
 
