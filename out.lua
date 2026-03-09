@@ -11792,12 +11792,17 @@ Main = (function()
 		-- Skip entire subtree if name matches
 		local SKIP_SUBTREE_NAME = {
 			Animate=true, RigAttachments=true, AvatarPartScaleType=true,
-			-- Skip entire character body subtrees (thousands of parts, no useful info)
+			-- Character body parts
 			HumanoidRootPart=true, LeftUpperArm=true, RightUpperArm=true,
 			LeftLowerArm=true, RightLowerArm=true, LeftHand=true, RightHand=true,
 			LeftUpperLeg=true, RightUpperLeg=true, LeftLowerLeg=true, RightLowerLeg=true,
 			LeftFoot=true, RightFoot=true, UpperTorso=true, LowerTorso=true,
 			Head=true,
+			-- Roblox internal UI frameworks (thousands of instances, zero game logic)
+			PlayerModule=true, RbxCharacterSounds=true, AtomicBinding=true,
+			TopbarStandard=true, TopbarStandardClipped=true,
+			TopbarPlusGui=true, TopbarPlusReference=true,
+			CorePackages=true, CoreGui=true, RobloxGui=true,
 		}
 
 		-- Skip instance if its parent's class is one of these
@@ -12141,20 +12146,48 @@ Main = (function()
 			task.wait()
 		end
 
-		-- Players: LocalPlayer scripts/gui only, skip other players
+		-- Players: LocalPlayer only, surgically skip Roblox internals
 		local ok3,PLRS=pcall(function() return game:GetService("Players") end)
 		if ok3 and PLRS then
 			local lp=PLRS.LocalPlayer
 			if lp then
 				w("[SERVICE] Players (LocalPlayer only)")
-				-- Dump player attributes
 				dumpAttrs(lp,"  ")
-				-- Walk PlayerGui and PlayerScripts (the useful bits)
-				local LP_TARGETS = {"PlayerGui","PlayerScripts","Backpack"}
-				for _,tname in ipairs(LP_TARGETS) do
-					local t2=lp:FindFirstChild(tname)
-					if t2 then walk(t2); task.wait() end
+
+				-- PlayerGui: walk each child individually, skip topbar/UI framework noise
+				local SKIP_GUI = {
+					TopbarStandard=true, TopbarStandardClipped=true,
+					TopbarPlusGui=true, TopbarPlusReference=true,
+					ProximityPrompts=true,
+				}
+				local pg=lp:FindFirstChild("PlayerGui")
+				if pg then
+					for _,child in ipairs(pg:GetChildren()) do
+						local cnok,cname=pcall(function() return child.Name end)
+						if cnok and not SKIP_GUI[cname] then
+							walk(child); task.wait()
+						end
+					end
 				end
+
+				-- PlayerScripts: skip PlayerModule (Roblox internals) and RbxCharacterSounds
+				local SKIP_PS = {
+					PlayerModule=true, RbxCharacterSounds=true,
+					AtomicBinding=true,
+				}
+				local ps=lp:FindFirstChild("PlayerScripts")
+				if ps then
+					for _,child in ipairs(ps:GetChildren()) do
+						local cnok,cname=pcall(function() return child.Name end)
+						if cnok and not SKIP_PS[cname] then
+							walk(child); task.wait()
+						end
+					end
+				end
+
+				-- Backpack: walk fully (tools live here)
+				local bp=lp:FindFirstChild("Backpack")
+				if bp then walk(bp); task.wait() end
 			end
 		end
 
