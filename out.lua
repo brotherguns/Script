@@ -2387,7 +2387,7 @@ local function main()
 	local Lib = {}
 
 	local renderStepped = service.RunService.RenderStepped
-	local signalWait = renderStepped.wait
+	local signalWait = function() task.wait() end
 	local PH = newproxy() -- Placeholder, must be replaced in constructor
 	local SIGNAL = newproxy()
 
@@ -2631,9 +2631,8 @@ local function main()
 	end)()
 
 	Lib.FastWait = function(s)
-		if not s then return signalWait(renderStepped) end
-		local start = tick()
-		while tick() - start < s do signalWait(renderStepped) end
+		if not s then return task.wait() end
+		task.wait(s)
 	end
 
 	Lib.ButtonAnim = function(button,data)
@@ -2788,7 +2787,7 @@ local function main()
 	end
 
 	Lib.DeferFunc = function(f,...)
-		signalWait(renderStepped)
+		task.wait()
 		return f(...)
 	end
 	
@@ -10998,7 +10997,7 @@ Main = (function()
 		intro.SetProgress("Fetching Roblox Version",0.2)
 		if Main.Elevated then
 			local fileVer = Lib.ReadFile("dex/deps_version.dat")
-			Main.ClientVersion = (type(Version)=="function" and pcall(Version) and Version()) or "0.0.0.0"
+			Main.ClientVersion = (function() local ok,v = pcall(function() local fn=rawget(_G,"Version"); if type(fn)=="function" then return fn() end; local ie=rawget(_G,"identifyexecutor"); if type(ie)=="function" then return ie() end; return "0.0.0.0" end); return (ok and v) or "0.0.0.0" end)()
 			if fileVer then
 				Main.DepsVersionData = string.split(fileVer,"\n")
 				if Main.LocalDepsUpToDate() then Main.RobloxVersion=Main.DepsVersionData[2] end
