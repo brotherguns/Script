@@ -2631,8 +2631,7 @@ local function main()
 	end)()
 
 	Lib.FastWait = function(s)
-		if not s then return task.wait() end
-		task.wait(s)
+		task.wait(s or 0)
 	end
 
 	Lib.ButtonAnim = function(button,data)
@@ -10206,13 +10205,10 @@ Main = (function()
 	end
 
 	Main.InitEnv = function()
+		local genv = getgenv()
 		local function getG(name)
-			return rawget(_G,name) or _G[name]
+			return genv[name]
 		end
-		setmetatable(env,{__newindex = function(self,name,func)
-			if not func then Main.MissingEnv[#Main.MissingEnv+1] = name; return end
-			rawset(self,name,func)
-		end})
 		env.readfile   = getG("readfile")
 		env.writefile  = getG("writefile")
 		env.appendfile = getG("appendfile")
@@ -10239,7 +10235,6 @@ Main = (function()
 		local ie = getG("identifyexecutor")
 		if ie then Main.Executor = ie() end
 		Main.GuiHolder = Main.Elevated and service.CoreGui or plr:FindFirstChildOfClass("PlayerGui")
-		setmetatable(env,nil)
 	end
 
 	Main.LoadSettings = function()
@@ -10705,8 +10700,8 @@ Main = (function()
 	end
 
 	Main.SetupFilesystem = function()
-		if not env.writefile or not env.makefolder then return end
-		local mf = env.makefolder
+		local mf = env.makefolder or getgenv()["makefolder"]
+		if not mf then return end
 		pcall(mf,"dex"); pcall(mf,"dex/assets"); pcall(mf,"dex/saved")
 		pcall(mf,"dex/plugins"); pcall(mf,"dex/ModuleCache")
 	end
@@ -10716,14 +10711,18 @@ Main = (function()
 	end
 
 	Main.DumpGame = function()
-		if not env.writefile then
+		local genv = getgenv()
+		local wf = env.writefile or genv["writefile"]
+		local af = env.appendfile or genv["appendfile"]
+		local mf = env.makefolder or genv["makefolder"]
+		if not wf then
 			warn("[Dex] writefile unavailable -- dump aborted")
 			return
 		end
 		local TS=tostring(math.floor(tick()))
 		local txtFile="dex/saved/dump_"..TS..".txt"
 		local sDir="dex/saved/scripts_"..TS
-		pcall(env.makefolder,sDir)
+		if mf then pcall(mf,sDir) end
 
 		local YIELD_EVERY=8
 		local MAX_DEPTH=18
@@ -10753,8 +10752,8 @@ Main = (function()
 		local function fl()
 			if #buf==0 then return end
 			local chunk=table.concat(buf,"\n").."\n"; buf={}; bl=0
-			if firstWrite then pcall(env.writefile,txtFile,chunk); firstWrite=false
-			else pcall(env.appendfile,txtFile,chunk) end
+			if firstWrite then pcall(wf,txtFile,chunk); firstWrite=false
+			else if af then pcall(af,txtFile,chunk) else pcall(wf,txtFile,chunk) end end
 		end
 		local function w(s) buf[#buf+1]=(s or ""); bl=bl+1; if bl>=120 then fl() end end
 		local function sep() w(("-"):rep(60)) end
@@ -10785,7 +10784,7 @@ Main = (function()
 			if not src or src=="" then return nil,0 end
 			local fn=inst:GetFullName():gsub("[%./%\\%s]","_")..".lua"
 			local fp=sDir.."/"..fn
-			pcall(env.writefile,fp,src)
+			pcall(wf,fp,src)
 			return fp,#src
 		end
 
@@ -11000,7 +10999,13 @@ Main = (function()
 		intro.SetProgress("Fetching Roblox Version",0.2)
 		if Main.Elevated then
 			local fileVer = Lib.ReadFile("dex/deps_version.dat")
-			Main.ClientVersion = (function() local ok,v=pcall(function() local fn=rawget(_G,"Version") or _G["Version"]; if type(fn)=="function" then return fn() end; local ie=rawget(_G,"identifyexecutor") or _G["identifyexecutor"]; if type(ie)=="function" then return ie() end; return "0.0.0.0" end); return (ok and v) or "0.0.0.0" end)()
+			Main.ClientVersion = (function()
+				local fn = getgenv()["Version"]
+				if type(fn)=="function" then local ok,v=pcall(fn); if ok then return v end end
+				local ie = getgenv()["identifyexecutor"]
+				if type(ie)=="function" then local ok,v=pcall(ie); if ok then return v end end
+				return "0.0.0.0"
+			end)()
 			if fileVer then
 				Main.DepsVersionData = string.split(fileVer,"\n")
 				if Main.LocalDepsUpToDate() then Main.RobloxVersion=Main.DepsVersionData[2] end
