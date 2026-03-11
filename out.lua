@@ -31,7 +31,7 @@ local function main()
 	local Lib = {}
 
 	local renderStepped = service.RunService.RenderStepped
-	local signalWait = renderStepped.wait
+	local signalWait = function(sig) if task then task.wait() else sig:Wait() end end
 	local PH = newproxy() 
 	local SIGNAL = newproxy()
 
@@ -1824,7 +1824,7 @@ local function main()
 
 		funcs.ShowAndFocus = function(self,data)
 			static.ShowWindow(self,data)
-			service.RunService.RenderStepped:wait()
+			task.wait()
 			self:Focus()
 		end
 
@@ -10177,9 +10177,11 @@ Main = (function()
 			local moduleData=control.Main()
 			Apps[name]=moduleData; return moduleData
 		else
-			local module = script:WaitForChild("Modules"):WaitForChild(name,2)
-			if not module then Main.Error("CANNOT FIND MODULE "..name) end
-			local control=require(module)
+			if not EmbeddedModules or not EmbeddedModules[name] then
+				Main.Error("CANNOT FIND MODULE "..name); return
+			end
+			local control = EmbeddedModules[name]()
+			if not control then Main.Error("Missing Embedded Module: "..name); return end
 			Main.AppControls[name]=control
 			control.InitDeps(Main.GetInitDeps())
 			local moduleData=control.Main()
@@ -10492,10 +10494,9 @@ Main = (function()
 		local cre=gui.Main.Creator; local crg=cre.UIGradient
 		local stat=gui.Main.Holder.StatusText; local pb=gui.Main.Holder.ProgressBar
 		local tweenS=service.TweenService
-		local rs=service.RunService.RenderStepped; local sw=rs.wait
 		local function fw(s)
-			if not s then return sw(rs) end
-			local t=tick(); while tick()-t<s do sw(rs) end
+			if not s then task.wait() return end
+			local t=tick(); while tick()-t<s do task.wait() end
 		end
 		stat.Text=initStatus
 		local function tn(n,ti,f)
