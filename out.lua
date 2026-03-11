@@ -10999,23 +10999,322 @@ Main = (function()
 		
 		Main.CreateApp({Name = "Script Viewer", IconMap = Main.LargeIcons, Icon = "Script_Viewer", Window = ScriptViewer.Window})
 		
+		-- Dump Game Button (mobile-friendly, full width)
+		local dumpBtn = Instance.new("TextButton")
+		dumpBtn.Name = "DumpButton"
+		dumpBtn.Size = UDim2.new(1, -16, 0, 48)
+		dumpBtn.Position = UDim2.new(0, 8, 0, 0)
+		dumpBtn.BackgroundColor3 = Color3.fromRGB(34, 139, 34)
+		dumpBtn.BorderSizePixel = 0
+		dumpBtn.Font = Enum.Font.GothamBold
+		dumpBtn.TextColor3 = Color3.new(1, 1, 1)
+		dumpBtn.TextSize = 16
+		dumpBtn.Text = "💾 Dump Game"
+		dumpBtn.ZIndex = 6
+		dumpBtn.Parent = gui.OpenButton.MainFrame
+		Instance.new("UICorner", dumpBtn).CornerRadius = UDim.new(0, 6)
+
+		local function onDumpTap()
+			Main.SetMainGuiOpen(false)
+			task.spawn(Main.DumpGame)
+		end
+		dumpBtn.MouseButton1Click:Connect(onDumpTap)
+		dumpBtn.TouchTap:Connect(onDumpTap)
+
+		-- Push apps frame down so button doesnt overlap
+		gui.OpenButton.MainFrame.AppsFrame.Position = UDim2.new(0.5, 0, 0, 56)
+		gui.OpenButton.MainFrame.AppsFrame.Size = UDim2.new(0, 222, 1, -81)
+
 		Lib.ShowGui(gui)
 	end
 	
 	Main.SetupFilesystem = function()
-		if not env.writefile or not env.makefolder then return end
-		
-		local writefile,makefolder = env.writefile,env.makefolder
-		
-		makefolder("dex")
-		makefolder("dex/assets")
-		makefolder("dex/saved")
-		makefolder("dex/plugins")
-		makefolder("dex/ModuleCache")
+		local genv = getgenv()
+		local mf = env.makefolder or genv["makefolder"]
+		if not mf then return end
+		pcall(mf,"dex") pcall(mf,"dex/assets") pcall(mf,"dex/saved")
+		pcall(mf,"dex/plugins") pcall(mf,"dex/ModuleCache")
 	end
 	
 	Main.LocalDepsUpToDate = function()
 		return Main.DepsVersionData and Main.ClientVersion == Main.DepsVersionData[1]
+	end
+
+	Main.DumpGame = function()
+		local genv = getgenv()
+		local wf  = env.writefile  or genv["writefile"]
+		local af  = env.appendfile or genv["appendfile"]
+		local mf  = env.makefolder or genv["makefolder"]
+		local cb  = env.setclipboard or genv["setclipboard"]
+
+		local useClip = not wf
+		if useClip and not cb then
+			warn("[Dex] No writefile or setclipboard available")
+			return
+		end
+
+		local TS = tostring(math.floor(tick()))
+		local txtFile = "dex/saved/dump_"..TS..".txt"
+		local sDir   = "dex/saved/scripts_"..TS
+		if mf then
+			pcall(mf, "dex")
+			pcall(mf, "dex/saved")
+			pcall(mf, sDir)
+		end
+
+		-- Buffer + flush
+		local buf = {} local clipBuf = {} local bl = 0 local firstWrite = true
+		local function fl()
+			if #buf == 0 then return end
+			local chunk = table.concat(buf, "\n").."\n"
+			buf = {} bl = 0
+			if useClip then
+				clipBuf[#clipBuf+1] = chunk
+			elseif firstWrite then
+				if wf then pcall(wf, txtFile, chunk) end
+				firstWrite = false
+			else
+				if af then pcall(af, txtFile, chunk)
+				else pcall(wf, txtFile, chunk) end
+			end
+		end
+		local function w(s) buf[#buf+1] = (s or "") bl=bl+1 if bl >= 100 then fl() end end
+		local function sep() w(("-"):rep(60)) end
+		local function hdr(t) w(("="):rep(60)) w("  "..t) w(("="):rep(60)) end
+
+		-- Settings
+		local YIELD_EVERY = 8
+		local MAX_DEPTH   = 20
+		local SKIP_CLASS = {
+			Motor6D=true,Bone=true,WeldConstraint=true,Weld=true,
+			RigidConstraint=true,NoCollisionConstraint=true,
+			SpecialMesh=true,DataModelMesh=true,BlockMesh=true,
+			CylinderMesh=true,FileMesh=true,Animator=true,
+			AnimationController=true,ForceField=true,
+			BallSocketConstraint=true,HingeConstraint=true,
+			PrismaticConstraint=true,RodConstraint=true,
+			RopeConstraint=true,SpringConstraint=true,
+			TorsionSpringConstraint=true,UniversalConstraint=true,
+			PlaneConstraint=true,LinearVelocity=true,
+			AngularVelocity=true,Attachment=true,
+			Decal=true,Texture=true,SurfaceAppearance=true,
+			Fire=true,Smoke=true,Sparkles=true,SelectionSphere=true,
+			SelectionBox=true,ArcHandles=true,Handles=true,
+		}
+		local SKIP_NAME = {
+			Animate=true,RigAttachments=true,AvatarPartScaleType=true,
+			PlayerModule=true,RbxCharacterSounds=true,
+			AtomicBinding=true,TopbarStandard=true,
+			TopbarStandardClipped=true,TopbarPlusGui=true,
+			TopbarPlusReference=true,CorePackages=true,
+		}
+		local IS_SCRIPT = {Script=true,LocalScript=true,ModuleScript=true}
+		local IS_REMOTE = {RemoteEvent=true,RemoteFunction=true,BindableEvent=true,BindableFunction=true}
+
+		-- Value serializer
+		local function sv(val)
+			local t = typeof(val)
+			if t=="string" then
+				local s = val:sub(1,120)
+				return '"'..(#val>120 and s.."..." or s):gsub('"','\\")'):gsub("\n","\\n")..'"' 
+			elseif t=="number"  then return tostring(val)
+			elseif t=="boolean" then return tostring(val)
+			elseif t=="Vector3" then return ("V3(%g,%g,%g)"):format(val.X,val.Y,val.Z)
+			elseif t=="Color3"  then return ("rgb(%d,%d,%d)"):format(val.R*255,val.G*255,val.B*255)
+			elseif t=="CFrame"  then local p=val.Position; return ("CF(%g,%g,%g)"):format(p.X,p.Y,p.Z)
+			elseif t=="EnumItem" then return tostring(val)
+			elseif t=="Instance" then
+				local ok,fn = pcall(function() return val:GetFullName() end)
+				return "[ref]"..(ok and fn or "?")
+			else return "["..t.."]" end
+		end
+
+		-- Script saver
+		local savedScripts = 0
+		local function saveScript(inst)
+			if not wf then return end
+			local src = ""
+			pcall(function() src = inst.Source end)
+			if (src == "" or not src) and env.decompile then
+				local ok, dec = pcall(env.decompile, inst)
+				if ok and dec and dec ~= "" then src = dec end
+				task.wait()
+			end
+			if not src or src == "" then return end
+			local fn = inst:GetFullName():gsub("[%./%\%s]","_")..".lua"
+			local fp = sDir.."/"..fn
+			pcall(wf, fp, src)
+			savedScripts = savedScripts + 1
+		end
+
+		-- Recursive tree walker
+		local remotes = {} local scripts = {} local sounds = {} local values = {}
+		local icount = 0
+		local function dumpInst(inst, depth, pad)
+			if depth > MAX_DEPTH then return end
+			local ok1,cn = pcall(function() return inst.ClassName end) if not ok1 then return end
+			if SKIP_CLASS[cn] then return end
+			local ok2,nm = pcall(function() return inst.Name end) if not ok2 then return end
+			if SKIP_NAME[nm] then return end
+
+			icount = icount + 1
+			if icount % YIELD_EVERY == 0 then task.wait() end
+
+			local line = pad.."["..cn.."] "..nm
+
+			if IS_REMOTE[cn] then
+				local ok3,fn = pcall(function() return inst:GetFullName() end)
+				remotes[#remotes+1] = "  ["..cn.."] "..(ok3 and fn or nm)
+			end
+			if IS_SCRIPT[cn] then
+				local ok3,fn = pcall(function() return inst:GetFullName() end)
+				scripts[#scripts+1] = "  ["..cn.."] "..(ok3 and fn or nm)
+				pcall(saveScript, inst)
+			end
+			if cn == "Sound" then
+				local ok3,sid = pcall(function() return inst.SoundId end)
+				local ok4,fn  = pcall(function() return inst:GetFullName() end)
+				sounds[#sounds+1] = "  "..nm.." -> "..(ok3 and sid or "?").." @ "..(ok4 and fn or "?")
+			end
+			if cn:find("Value$") then
+				local ok3,v = pcall(function() return inst.Value end)
+				local ok4,fn = pcall(function() return inst:GetFullName() end)
+				if ok3 then values[#values+1] = "  "..(ok4 and fn or nm).." = "..sv(v) end
+			end
+
+			-- Key props
+			local extras = {}
+			if cn == "ProximityPrompt" then
+				pcall(function() extras[#extras+1] = "ActionText="..inst.ActionText end)
+				pcall(function() extras[#extras+1] = "ObjectText="..inst.ObjectText end)
+				pcall(function() extras[#extras+1] = "MaxDist="..inst.MaxActivationDistance end)
+			elseif cn == "ClickDetector" then
+				pcall(function() extras[#extras+1] = "MaxDist="..inst.MaxActivationDistance end)
+			elseif cn == "Humanoid" then
+				pcall(function() extras[#extras+1] = "HP="..inst.Health.."/"..inst.MaxHealth end)
+				pcall(function() extras[#extras+1] = "WS="..inst.WalkSpeed end)
+				pcall(function() extras[#extras+1] = "JP="..inst.JumpPower end)
+			elseif cn == "SpawnLocation" then
+				pcall(function() extras[#extras+1] = "Team="..tostring(inst.TeamColor) end)
+			elseif cn == "Tool" then
+				pcall(function() extras[#extras+1] = "Handle="..tostring(inst.RequiresHandle) end)
+			end
+			-- Attributes
+			local ok5,attrs = pcall(function() return inst:GetAttributes() end)
+			if ok5 and attrs then
+				for k,v in pairs(attrs) do extras[#extras+1] = "@"..k.."="..sv(v) end
+			end
+
+			if #extras > 0 then
+				line = line.." {"..table.concat(extras,", ").."}"
+			end
+			w(line)
+
+			local ok6,children = pcall(function() return inst:GetChildren() end)
+			if not ok6 then return end
+			for _,child in ipairs(children) do
+				dumpInst(child, depth+1, pad.."  ")
+			end
+		end
+
+		-- Walk all useful services
+		local SERVICES = {
+			"Workspace","ReplicatedStorage","ReplicatedFirst",
+			"ServerStorage","ServerScriptService",
+			"StarterGui","StarterPlayer","StarterPack",
+			"SoundService","Lighting","Teams",
+			"Players","Chat","TextChatService",
+		}
+
+		w("Dex Game Dump | PlaceId:"..tostring(game.PlaceId).." | "..os.date())
+		w("Executor: "..(Main.Executor or "Unknown"))
+		sep()
+
+		for _,svcName in ipairs(SERVICES) do
+			local ok, svc = pcall(function() return game:GetService(svcName) end)
+			if not ok or not svc then continue end
+			hdr(svcName)
+			local ok2,children = pcall(function() return svc:GetChildren() end)
+			if ok2 then
+				for _,child in ipairs(children) do
+					dumpInst(child, 0, "  ")
+				end
+			end
+			w("")
+			task.wait()
+		end
+
+		-- Lighting properties
+		hdr("LIGHTING PROPERTIES")
+		pcall(function()
+			local L = game:GetService("Lighting")
+			for _,prop in ipairs({"Brightness","ClockTime","FogEnd","FogStart","GlobalShadows","Ambient","OutdoorAmbient","TimeOfDay"}) do
+				local ok,v = pcall(function() return L[prop] end)
+				if ok then w("  "..prop.." = "..sv(v)) end
+			end
+		end)
+		w("")
+
+		-- Nil-parent hidden scripts (from getgc)
+		if env.getgc then
+			hdr("HIDDEN SCRIPTS (nil-parent)")
+			local ok, gc = pcall(env.getgc, true)
+			if ok and gc then
+				for _,v in ipairs(gc) do
+					if typeof(v)=="Instance" then
+						local ok2,cn = pcall(function() return v.ClassName end)
+						if ok2 and IS_SCRIPT[cn] then
+							local ok3,par = pcall(function() return v.Parent end)
+							if ok3 and par == nil then
+								local ok4,nm = pcall(function() return v.Name end)
+								w("  ["..cn.."] "..(ok4 and nm or "?"))
+								pcall(saveScript, v)
+							end
+						end
+					end
+				end
+			end
+			w("")
+		end
+
+		-- CollectionService tags
+		hdr("COLLECTIONSERVICE TAGS")
+		pcall(function()
+			local CS = game:GetService("CollectionService")
+			for _,tag in ipairs(CS:GetAllTags()) do
+				local tagged = CS:GetTagged(tag)
+				w("  ["..tag.."] ("..#tagged.." instances)")
+			end
+		end)
+		w("")
+
+		-- Summaries
+		hdr("REMOTES ("..#remotes..")")
+		for _,r in ipairs(remotes) do w(r) end
+		w("")
+
+		hdr("SCRIPTS ("..#scripts..")")
+		for _,s in ipairs(scripts) do w(s) end
+		w("")
+
+		hdr("SOUNDS ("..#sounds..")")
+		for _,s in ipairs(sounds) do w(s) end
+		w("")
+
+		hdr("VALUES ("..#values..")")
+		for _,v in ipairs(values) do w(v) end
+		w("")
+
+		hdr("END OF DUMP")
+		fl()
+
+		if useClip then
+			local full = table.concat(clipBuf, "")
+			if cb then pcall(cb, full) end
+			warn("[Dex] Dump copied to clipboard! ("..#full.." chars)")
+		else
+			warn("[Dex] Dump saved -> "..txtFile.." | Scripts saved: "..savedScripts)
+		end
 	end
 	
 	Main.Init = function()
