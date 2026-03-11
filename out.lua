@@ -10999,32 +10999,87 @@ Main = (function()
 		
 		Main.CreateApp({Name = "Script Viewer", IconMap = Main.LargeIcons, Icon = "Script_Viewer", Window = ScriptViewer.Window})
 		
-		-- Dump Game Button (mobile-friendly, full width)
+		-- DUMP BUTTON: standalone floating button, always visible, parented to ScreenGui
+		local dumpScreen = Instance.new("ScreenGui")
+		dumpScreen.Name = "DexDumpGui"
+		dumpScreen.IgnoreGuiInset = true
+		dumpScreen.ResetOnSpawn = false
+		dumpScreen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+
 		local dumpBtn = Instance.new("TextButton")
 		dumpBtn.Name = "DumpButton"
-		dumpBtn.Size = UDim2.new(1, -16, 0, 48)
-		dumpBtn.Position = UDim2.new(0, 8, 0, 0)
+		dumpBtn.Size = UDim2.new(0, 140, 0, 52)
+		dumpBtn.Position = UDim2.new(0, 12, 0.5, 0)
+		dumpBtn.AnchorPoint = Vector2.new(0, 0.5)
 		dumpBtn.BackgroundColor3 = Color3.fromRGB(34, 139, 34)
 		dumpBtn.BorderSizePixel = 0
 		dumpBtn.Font = Enum.Font.GothamBold
 		dumpBtn.TextColor3 = Color3.new(1, 1, 1)
-		dumpBtn.TextSize = 16
-		dumpBtn.Text = "💾 Dump Game"
-		dumpBtn.ZIndex = 6
-		dumpBtn.Parent = gui.OpenButton.MainFrame
-		Instance.new("UICorner", dumpBtn).CornerRadius = UDim.new(0, 6)
+		dumpBtn.TextSize = 15
+		dumpBtn.Text = "DUMP GAME"
+		dumpBtn.ZIndex = 10
+		dumpBtn.AutoButtonColor = false
+		Instance.new("UICorner", dumpBtn).CornerRadius = UDim.new(0, 8)
+		dumpBtn.Parent = dumpScreen
 
-		local function onDumpTap()
-			Main.SetMainGuiOpen(false)
-			task.spawn(Main.DumpGame)
+		-- Make it draggable so user can move it out of the way
+		local dragging, dragStart, startPos
+		local function onInput(input)
+			if input.UserInputType == Enum.UserInputType.Touch
+			or input.UserInputType == Enum.UserInputType.MouseButton1 then
+				dragging = true
+				dragStart = input.Position
+				startPos = dumpBtn.Position
+				input.Changed:Connect(function()
+					if input.UserInputState == Enum.UserInputState.End then
+						dragging = false
+					end
+				end)
+			end
 		end
-		dumpBtn.MouseButton1Click:Connect(onDumpTap)
-		dumpBtn.TouchTap:Connect(onDumpTap)
+		local moved = false
+		dumpBtn.InputBegan:Connect(onInput)
+		service.UserInputService.InputChanged:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.Touch
+			or input.UserInputType == Enum.UserInputType.MouseMovement) then
+				local delta = input.Position - dragStart
+				if delta.Magnitude > 6 then moved = true end
+				dumpBtn.Position = UDim2.new(
+					startPos.X.Scale, startPos.X.Offset + delta.X,
+					startPos.Y.Scale, startPos.Y.Offset + delta.Y
+				)
+			end
+		end)
 
-		-- Push apps frame down so button doesnt overlap
-		gui.OpenButton.MainFrame.AppsFrame.Position = UDim2.new(0.5, 0, 0, 56)
-		gui.OpenButton.MainFrame.AppsFrame.Size = UDim2.new(0, 222, 1, -81)
+		local running = false
+		dumpBtn.MouseButton1Click:Connect(function()
+			if moved then moved = false return end
+			if running then return end
+			running = true
+			dumpBtn.Text = "Dumping..."
+			dumpBtn.BackgroundColor3 = Color3.fromRGB(180, 100, 0)
+			task.spawn(function()
+				Main.DumpGame()
+				dumpBtn.Text = "DUMP GAME"
+				dumpBtn.BackgroundColor3 = Color3.fromRGB(34, 139, 34)
+				running = false
+			end)
+		end)
+		dumpBtn.TouchTap:Connect(function()
+			if moved then moved = false return end
+			if running then return end
+			running = true
+			dumpBtn.Text = "Dumping..."
+			dumpBtn.BackgroundColor3 = Color3.fromRGB(180, 100, 0)
+			task.spawn(function()
+				Main.DumpGame()
+				dumpBtn.Text = "DUMP GAME"
+				dumpBtn.BackgroundColor3 = Color3.fromRGB(34, 139, 34)
+				running = false
+			end)
+		end)
 
+		Lib.ShowGui(dumpScreen)
 		Lib.ShowGui(gui)
 	end
 	
