@@ -831,7 +831,8 @@ local function main()
 
 			scrollThumb.InputBegan:Connect(function(input)
 				if input.UserInputType == Enum.UserInputType.MouseMovement and not thumbPress then scrollThumb.BackgroundTransparency = 0.2 scrollThumb.BackgroundColor3 = self.ThumbSelectColor end
-				if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+				local isThumbClick = input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+				if not isThumbClick then return end
 
 				local dir = self.Horizontal and "X" or "Y"
 				local lastThumbPos = nil
@@ -840,12 +841,13 @@ local function main()
 				thumbFramePress = false			
 				thumbPress = true
 				scrollThumb.BackgroundTransparency = 0
-				local mouseOffset = mouse[dir] - scrollThumb.AbsolutePosition[dir]
-				local mouseStart = mouse[dir]
+				local mouseOffset = input.Position[dir] - scrollThumb.AbsolutePosition[dir]
+				local mouseStart = input.Position[dir]
 				local releaseEvent
 				local mouseEvent
 				releaseEvent = user.InputEnded:Connect(function(input)
-					if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+					local isThumbEnd = input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+					if not isThumbEnd then return end
 					releaseEvent:Disconnect()
 					if mouseEvent then mouseEvent:Disconnect() end
 					if checkMouseInGui(scrollThumb) then scrollThumb.BackgroundTransparency = 0.2 else scrollThumb.BackgroundTransparency = 0 scrollThumb.BackgroundColor3 = self.ThumbColor end
@@ -875,19 +877,21 @@ local function main()
 				if input.UserInputType == Enum.UserInputType.MouseMovement and not thumbPress then scrollThumb.BackgroundTransparency = 0 scrollThumb.BackgroundColor3 = self.ThumbColor end
 			end)
 			scrollThumbFrame.InputBegan:Connect(function(input)
-				if input.UserInputType ~= Enum.UserInputType.MouseButton1 or checkMouseInGui(scrollThumb) then return end
+				local isFrameClick = input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+				if not isFrameClick or checkMouseInGui(scrollThumb) then return end
 
 				local dir = self.Horizontal and "X" or "Y"
+				local inputPos = input.Position[dir]
 				local scrollDir = 0
-				if mouse[dir] >= scrollThumb.AbsolutePosition[dir] + scrollThumb.AbsoluteSize[dir] then
+				if inputPos >= scrollThumb.AbsolutePosition[dir] + scrollThumb.AbsoluteSize[dir] then
 					scrollDir = 1
 				end
 
 				local function doTick()
 					local scrollSize = self.VisibleSpace - 1
-					if scrollDir == 0 and mouse[dir] < scrollThumb.AbsolutePosition[dir] then
+					if scrollDir == 0 and inputPos < scrollThumb.AbsolutePosition[dir] then
 						self:ScrollTo(self.Index - scrollSize)
-					elseif scrollDir == 1 and mouse[dir] >= scrollThumb.AbsolutePosition[dir] + scrollThumb.AbsoluteSize[dir] then
+					elseif scrollDir == 1 and inputPos >= scrollThumb.AbsolutePosition[dir] + scrollThumb.AbsoluteSize[dir] then
 						self:ScrollTo(self.Index + scrollSize)
 					end
 				end
@@ -898,7 +902,8 @@ local function main()
 				local thumbFrameTick = tick()
 				local releaseEvent
 				releaseEvent = user.InputEnded:Connect(function(input)
-					if input.UserInputType ~= Enum.UserInputType.MouseButton1 then return end
+					local isFrameEnd = input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+					if not isFrameEnd then return end
 					releaseEvent:Disconnect()
 					thumbFramePress = false
 				end)
@@ -1109,17 +1114,17 @@ local function main()
 
 					if input.UserInputType == Enum.UserInputType.MouseMovement then
 						resizer.BackgroundTransparency = 0.5
-					elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
+					elseif input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 						local releaseEvent,mouseEvent
 
-						local offX = mouse.X - resizer.AbsolutePosition.X
-						local offY = mouse.Y - resizer.AbsolutePosition.Y
+						local offX = input.Position.X - resizer.AbsolutePosition.X
+						local offY = input.Position.Y - resizer.AbsolutePosition.Y
 
 						self.Resizing = resizer
 						resizer.BackgroundTransparency = 1
 
 						releaseEvent = service.UserInputService.InputEnded:Connect(function(input)
-							if input.UserInputType == Enum.UserInputType.MouseButton1 then
+							if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 								releaseEvent:Disconnect()
 								mouseEvent:Disconnect()
 								self.Resizing = false
@@ -1251,14 +1256,15 @@ local function main()
 			self.ContentPane = guiMain.Content
 
 			guiTopBar.InputBegan:Connect(function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 and self.Draggable then
+				local isDragStart = (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and self.Draggable
+				if isDragStart then
 					local releaseEvent,mouseEvent
 
 					local maxX = sidesGui.AbsoluteSize.X
 					local initX = guiMain.AbsolutePosition.X
 					local initY = guiMain.AbsolutePosition.Y
-					local offX = mouse.X - initX
-					local offY = mouse.Y - initY
+					local offX = input.Position.X - initX
+					local offY = input.Position.Y - initY
 
 					local alignInsertPos,alignInsertSide
 
@@ -10094,7 +10100,7 @@ local env      = {}
 local service  = setmetatable({},{__index=function(self,name)
 	local s = game:GetService(name); self[name]=s; return s
 end})
-local plr = service.Players.LocalPlayer or service.Players.PlayerAdded:wait()
+local plr = service.Players.LocalPlayer or service.Players.PlayerAdded:Wait()
 
 local create = function(data)
 	local insts = {}
@@ -10495,8 +10501,7 @@ Main = (function()
 		local stat=gui.Main.Holder.StatusText; local pb=gui.Main.Holder.ProgressBar
 		local tweenS=service.TweenService
 		local function fw(s)
-			if not s then task.wait() return end
-			local t=tick(); while tick()-t<s do task.wait() end
+			task.wait(s or 0)
 		end
 		stat.Text=initStatus
 		local function tn(n,ti,f)
@@ -11663,4 +11668,31 @@ Main = (function()
 	return Main
 end)()
 
-Main.Init()
+local _ok, _err = xpcall(Main.Init, function(e)
+    local msg = tostring(e)
+    warn("[DEX CRASH] " .. msg)
+    if game:GetService("Players").LocalPlayer then
+        local sg = Instance.new("ScreenGui")
+        sg.Name = "DexError"
+        sg.ResetOnSpawn = false
+        sg.IgnoreGuiInset = true
+        sg.Parent = game:GetService("Players").LocalPlayer:FindFirstChildOfClass("PlayerGui") or game:GetService("CoreGui")
+        local fr = Instance.new("Frame", sg)
+        fr.Size = UDim2.new(1,0,1,0)
+        fr.BackgroundColor3 = Color3.fromRGB(20,20,20)
+        fr.BorderSizePixel = 0
+        local lbl = Instance.new("TextLabel", fr)
+        lbl.Size = UDim2.new(1,-20,1,-20)
+        lbl.Position = UDim2.new(0,10,0,10)
+        lbl.BackgroundTransparency = 1
+        lbl.TextColor3 = Color3.fromRGB(255,80,80)
+        lbl.Font = Enum.Font.Code
+        lbl.TextSize = 14
+        lbl.TextWrapped = true
+        lbl.TextXAlignment = Enum.TextXAlignment.Left
+        lbl.TextYAlignment = Enum.TextYAlignment.Top
+        lbl.Text = "[DEX ERROR]\n" .. msg
+    end
+    return e
+end)
+if not _ok then warn("[DEX] Failed to initialize: " .. tostring(_err)) end
