@@ -1,1055 +1,4 @@
 local EmbeddedModules = {
-["RemoteSpy"] = function()
---[[
-	RemoteSpy Module
-	Hooks RemoteEvents, RemoteFunctions, BindableEvents, BindableFunctions
-	Logs all fired/invoked calls with full argument inspection
-	Anti-detection: uses hookfunction/replaceclosure, wrapped in pcall chains
-]]
-
--- Common Locals
-local Main,Lib,Apps,Settings
-local Explorer, Properties, ScriptViewer, Notebook
-local API,RMD,env,service,plr,create,createSimple
-
-local function initDeps(data)
-	Main = data.Main; Lib = data.Lib; Apps = data.Apps; Settings = data.Settings
-	API = data.API; RMD = data.RMD; env = data.env; service = data.service
-	plr = data.plr; create = data.create; createSimple = data.createSimple
-end
-
-local function initAfterMain()
-	Explorer = Apps.Explorer; Properties = Apps.Properties
-	ScriptViewer = Apps.ScriptViewer; Notebook = Apps.Notebook
-end
-
-local function main()
-	local RemoteSpy = {}
-
-	-- -- Serializer --------------------------------------------------------
-	local MAX_DEPTH = 4
-	local function serArg(v, depth)
-		depth = depth or 0
-		local t = typeof(v)
-		if t == "nil"      then return "nil"
-		elseif t == "boolean" then return tostring(v)
-		elseif t == "number"  then
-			if v ~= v then return "nan"
-			elseif v == math.huge then return "inf"
-			elseif v == -math.huge then return "-inf"
-			else return tostring(v) end
-		elseif t == "string" then
-			if #v > 80 then return '"'..v:sub(1,80):gsub('"','\\"')..'..." ('..#v..')'
-			else return '"'..v:gsub('"','\\"')..'"' end
-		elseif t == "Vector3"  then return ("Vector3(%g, %g, %g)"):format(v.X,v.Y,v.Z)
-		elseif t == "Vector2"  then return ("Vector2(%g, %g)"):format(v.X,v.Y)
-		elseif t == "CFrame"   then local p=v.Position return ("CFrame(%g,%g,%g)"):format(p.X,p.Y,p.Z)
-		elseif t == "Color3"   then return ("Color3(%d,%d,%d)"):format(v.R*255,v.G*255,v.B*255)
-		elseif t == "UDim2"    then return ("UDim2(%g,%d,%g,%d)"):format(v.X.Scale,v.X.Offset,v.Y.Scale,v.Y.Offset)
-		elseif t == "EnumItem" then return tostring(v)
-		elseif t == "Instance" then
-			local ok,fn = pcall(function() return v:GetFullName() end)
-			return "[Instance:"..v.ClassName.."] ".. (ok and fn or v.Name)
-		elseif t == "table" then
-			if depth >= MAX_DEPTH then return "{...}" end
-			local parts = {}
-			local i = 0
-			for k,val in pairs(v) do
-				i = 				i + 1
-				if i > 20 then parts[#parts+1]="..."; break end
-				local ks = type(k)=="string" and k or ("["..serArg(k,depth+1).."]")
-				parts[#parts+1] = ks.." = "..serArg(val, depth+1)
-			end
-			return "{"..table.concat(parts,", ").."}"
-		elseif t == "function" then return "[function]"
-		else return "["..t.."]" end
-	end
-
-	local function serArgs(...)
-		local args = {...}
-		local parts = {}
-		for i,v in ipairs(args) do parts[#parts+1] = serArg(v) end
-		return table.concat(parts, ", ")
-	end
-
-	-- -- Log storage -------------------------------------------------------
-	local logs = {}
-	local MAX_LOGS = 500
-	local logCallbacks = {}
-	RemoteSpy.Logs = logs
-
-	local function addLog(entry)
-		table.insert(logs, 1, entry)
-		if #logs > MAX_LOGS then table.remove(logs) end
-		for _,cb in ipairs(logCallbacks) do pcall(cb, entry) end
-	end
-
-	RemoteSpy.OnLog = function(cb)
-		logCallbacks[#logCallbacks+1] = cb
-	end
-
-	-- -- Hook tracking -----------------------------------------------------
-	local hooked = {}
-	local originalFuncs = {}
-	local blocklist = {}      -- set of remote names to ignore
-	local allowlist = nil     -- if set, only log these names
-
-	RemoteSpy.Blocklist = blocklist
-	RemoteSpy.SetAllowlist = function(names) allowlist = names end
-
-	-- -- Core hook ---------------------------------------------------------
-	local hookfn = hookfunction or replaceclosure or (syn and syn.hookfunction)
-
-	local function shouldLog(name)
-		if allowlist then
-			for _,n in ipairs(allowlist) do
-				if n == name then return true end
-			end
-			return false
-		end
-		for _,n in ipairs(blocklist) do
-			if n == name then return false end
-		end
-		return true
-	end
-
-	local function hookRemote(obj)
-		if not obj or hooked[obj] then return end
-		local cn = obj.ClassName
-		local name = obj.Name
-		local fullName = ""
-		pcall(function() fullName = obj:GetFullName() end)
-		hooked[obj] = true
-
-		if cn == "RemoteEvent" then
-			-- Hook FireServer
-			local mt = getrawmetatable and getrawmetatable(obj)
-			if mt and rawget(mt,"__namecall") and hookfn then
-				local orig = rawget(mt,"__namecall")
-				if not originalFuncs[mt] then
-					originalFuncs[mt] = orig
-					hookfn(orig, function(self, method, ...)
-						if rawequal(self, obj) and method == "FireServer" and shouldLog(name) then
-							addLog({
-								time = tick(),
-								type = "RE:Fire",
-								name = name,
-								path = fullName,
-								args = serArgs(...),
-								raw  = {...}
-							})
-						end
-						return orig(self, method, ...)
-					end)
-				end
-			else
-				-- Fallback: wrap FireServer via index
-				pcall(function()
-					local origFire = obj.FireServer
-					if origFire and hookfn then
-						hookfn(origFire, function(self, ...)
-							if shouldLog(name) then
-								addLog({time=tick(),type="RE:Fire",name=name,path=fullName,args=serArgs(...),raw={...}})
-							end
-							return origFire(self, ...)
-						end)
-					end
-				end)
-			end
-
-			-- Hook OnClientEvent
-			pcall(function()
-				obj.OnClientEvent:Connect(function(...)
-					if shouldLog(name) then
-						addLog({time=tick(),type="RE:OnClient",name=name,path=fullName,args=serArgs(...),raw={...}})
-					end
-				end)
-			end)
-
-		elseif cn == "RemoteFunction" then
-			pcall(function()
-				local origInvoke = obj.InvokeServer
-				if origInvoke and hookfn then
-					hookfn(origInvoke, function(self, ...)
-						if shouldLog(name) then
-							addLog({time=tick(),type="RF:Invoke",name=name,path=fullName,args=serArgs(...),raw={...}})
-						end
-						return origInvoke(self, ...)
-					end)
-				end
-			end)
-
-		elseif cn == "BindableEvent" then
-			pcall(function()
-				obj.Event:Connect(function(...)
-					if shouldLog(name) then
-						addLog({time=tick(),type="BE:Fire",name=name,path=fullName,args=serArgs(...),raw={...}})
-					end
-				end)
-			end)
-
-		elseif cn == "BindableFunction" then
-			pcall(function()
-				local origInvoke = obj.Invoke
-				if origInvoke and hookfn then
-					hookfn(origInvoke, function(self,...)
-						if shouldLog(name) then
-							addLog({time=tick(),type="BF:Invoke",name=name,path=fullName,args=serArgs(...),raw={...}})
-						end
-						return origInvoke(self,...)
-					end)
-				end
-			end)
-		end
-	end
-
-	-- -- Scan existing remotes ---------------------------------------------
-	local function scanAndHook(root)
-		pcall(function()
-			for _,inst in ipairs(root:GetDescendants()) do
-				local cn = inst.ClassName
-				if cn=="RemoteEvent" or cn=="RemoteFunction"
-				or cn=="BindableEvent" or cn=="BindableFunction" then
-					coroutine.wrap(hookRemote)(inst)
-				end
-			end
-		end)
-	end
-
-	local spyActive = false
-	local scanConnections = {}
-
-	RemoteSpy.Start = function()
-		if spyActive then return end
-		spyActive = true
-
-		-- Hook all current remotes
-		scanAndHook(game)
-		if env.getnilinstances then
-			pcall(function()
-				for _,inst in ipairs(env.getnilinstances()) do
-					scanAndHook(inst)
-				end
-			end)
-		end
-
-		-- Watch for new ones
-		local conn = game.DescendantAdded:Connect(function(inst)
-			local cn = inst.ClassName
-			if cn=="RemoteEvent" or cn=="RemoteFunction"
-			or cn=="BindableEvent" or cn=="BindableFunction" then
-				coroutine.wrap(hookRemote)(inst)
-			end
-		end)
-		scanConnections[#scanConnections+1] = conn
-	end
-
-	RemoteSpy.Stop = function()
-		spyActive = false
-		for _,conn in ipairs(scanConnections) do pcall(conn.Disconnect,conn) end
-		scanConnections = {}
-		-- Note: can't easily unhook functions, just stop adding new hooks
-	end
-
-	RemoteSpy.ClearLogs = function()
-		for i=#logs,1,-1 do logs[i]=nil end
-	end
-
-	RemoteSpy.SaveLogs = function()
-		if not env.writefile then return end
-		local ts = tostring(math.floor(tick()))
-		local lines = {"DEX REMOTE SPY LOG", "Tick: "..ts, ""}
-		for _,log in ipairs(logs) do
-			lines[#lines+1] = string.format("[%s] [%.2f] %s | Args: %s",
-				log.type, log.time, log.path, log.args)
-		end
-		pcall(env.writefile, "dex/saved/remotespy_"..ts..".txt", table.concat(lines,"\n"))
-		print("[RemoteSpy] Saved "..#logs.." logs")
-	end
-
-	-- -- Window UI ---------------------------------------------------------
-	local window
-	local listFrame
-	local logRows = {}
-	local filterText = ""
-
-	local COLOR = {
-		["RE:Fire"]     = Color3.fromRGB(255,120,60),
-		["RE:OnClient"] = Color3.fromRGB(60,180,255),
-		["RF:Invoke"]   = Color3.fromRGB(255,220,60),
-		["BE:Fire"]     = Color3.fromRGB(140,255,100),
-		["BF:Invoke"]   = Color3.fromRGB(200,100,255),
-	}
-
-	local function rebuildList()
-		-- Clear existing rows
-		for _,row in ipairs(logRows) do
-			if row.inst then pcall(function() row.inst:Destroy() end) end
-		end
-		logRows = {}
-		if not listFrame then return end
-
-		local y = 0
-		for i, log in ipairs(logs) do
-			if filterText == "" or log.path:lower():find(filterText,1,true)
-			or log.type:lower():find(filterText,1,true) then
-
-				local row = Instance.new("Frame")
-				row.Size = UDim2.new(1,0,0,36)
-				row.Position = UDim2.new(0,0,0,y)
-				row.BackgroundColor3 = i%2==0 and Color3.fromRGB(40,40,40) or Color3.fromRGB(34,34,34)
-				row.BorderSizePixel = 0
-				row.Parent = listFrame
-
-				local badge = Instance.new("TextLabel",row)
-				badge.Size = UDim2.new(0,80,0,16)
-				badge.Position = UDim2.new(0,4,0,2)
-				badge.BackgroundColor3 = COLOR[log.type] or Color3.fromRGB(180,180,180)
-				badge.TextColor3 = Color3.fromRGB(10,10,10)
-				badge.Font = Enum.Font.GothamBold
-				badge.TextSize = 10
-				badge.Text = log.type
-				badge.BorderSizePixel = 0
-				Instance.new("UICorner",badge).CornerRadius = UDim.new(0,3)
-
-				local timeLbl = Instance.new("TextLabel",row)
-				timeLbl.Size = UDim2.new(0,60,0,16)
-				timeLbl.Position = UDim2.new(0,88,0,2)
-				timeLbl.BackgroundTransparency = 1
-				timeLbl.TextColor3 = Color3.fromRGB(140,140,140)
-				timeLbl.Font = Enum.Font.Code
-				timeLbl.TextSize = 10
-				timeLbl.Text = ("%.1f"):format(log.time % 1000)
-				timeLbl.TextXAlignment = Enum.TextXAlignment.Left
-
-				local nameLbl = Instance.new("TextLabel",row)
-				nameLbl.Size = UDim2.new(1,-160,0,16)
-				nameLbl.Position = UDim2.new(0,150,0,2)
-				nameLbl.BackgroundTransparency = 1
-				nameLbl.TextColor3 = Color3.fromRGB(220,220,220)
-				nameLbl.Font = Enum.Font.GothamBold
-				nameLbl.TextSize = 11
-				nameLbl.Text = log.name
-				nameLbl.TextXAlignment = Enum.TextXAlignment.Left
-				nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
-
-				local argsLbl = Instance.new("TextLabel",row)
-				argsLbl.Size = UDim2.new(1,-8,0,14)
-				argsLbl.Position = UDim2.new(0,4,0,20)
-				argsLbl.BackgroundTransparency = 1
-				argsLbl.TextColor3 = Color3.fromRGB(160,200,255)
-				argsLbl.Font = Enum.Font.Code
-				argsLbl.TextSize = 10
-				argsLbl.Text = log.args ~= "" and log.args or "(no args)"
-				argsLbl.TextXAlignment = Enum.TextXAlignment.Left
-				argsLbl.TextTruncate = Enum.TextTruncate.AtEnd
-
-				-- Copy button
-				local copyBtn = Instance.new("TextButton",row)
-				copyBtn.Size = UDim2.new(0,16,0,16)
-				copyBtn.Position = UDim2.new(1,-20,0,2)
-				copyBtn.BackgroundColor3 = Color3.fromRGB(60,60,60)
-				copyBtn.TextColor3 = Color3.fromRGB(255,255,255)
-				copyBtn.Font = Enum.Font.GothamBold
-				copyBtn.TextSize = 9
-				copyBtn.Text = "C"
-				copyBtn.BorderSizePixel = 0
-				Instance.new("UICorner",copyBtn).CornerRadius = UDim.new(0,3)
-				copyBtn.MouseButton1Click:Connect(function()
-					if env.setclipboard then
-						env.setclipboard(("[%s] %s\nArgs: %s"):format(log.type, log.path, log.args))
-					end
-				end)
-
-				logRows[#logRows+1] = {inst=row}
-				y = 				y + 36
-			end
-		end
-
-		if listFrame then
-			listFrame.CanvasSize = UDim2.new(0,0,0,y)
-		end
-	end
-
-	local function buildWindow()
-		if window then return end
-		window = Lib.Window.new()
-		window:SetTitle("Remote Spy")
-		window:SetSize(500, 350)
-
-		local content = window:GetContent()
-
-		-- Toolbar
-		local toolbar = Instance.new("Frame",content)
-		toolbar.Size = UDim2.new(1,0,0,30)
-		toolbar.BackgroundColor3 = Color3.fromRGB(30,30,30)
-		toolbar.BorderSizePixel = 0
-
-		local function mkBtn(text, x, w, col)
-			local b = Instance.new("TextButton",toolbar)
-			b.Size = UDim2.new(0,w,0,22)
-			b.Position = UDim2.new(0,x,0,4)
-			b.BackgroundColor3 = col or Color3.fromRGB(55,55,55)
-			b.TextColor3 = Color3.fromRGB(255,255,255)
-			b.Font = Enum.Font.GothamBold
-			b.TextSize = 11
-			b.Text = text
-			b.BorderSizePixel = 0
-			Instance.new("UICorner",b).CornerRadius = UDim.new(0,4)
-			return b
-		end
-
-		local activeBtn = mkBtn("* Active",4,70,Color3.fromRGB(50,160,50))
-		local clearBtn  = mkBtn("Clear",78,50)
-		local saveBtn   = mkBtn("Save",132,50)
-
-		local filterBox = Instance.new("TextBox",toolbar)
-		filterBox.Size = UDim2.new(0,130,0,22)
-		filterBox.Position = UDim2.new(0,186,0,4)
-		filterBox.BackgroundColor3 = Color3.fromRGB(38,38,38)
-		filterBox.TextColor3 = Color3.fromRGB(220,220,220)
-		filterBox.PlaceholderText = "filter..."
-		filterBox.Font = Enum.Font.Code
-		filterBox.TextSize = 11
-		filterBox.BorderSizePixel = 0
-		filterBox.Text = ""
-		Instance.new("UICorner",filterBox).CornerRadius = UDim.new(0,4)
-
-		filterBox:GetPropertyChangedSignal("Text"):Connect(function()
-			filterText = filterBox.Text:lower()
-			rebuildList()
-		end)
-
-		local paused = false
-		activeBtn.MouseButton1Click:Connect(function()
-			paused = not paused
-			activeBtn.Text = paused and "o Paused" or "* Active"
-			activeBtn.BackgroundColor3 = paused and Color3.fromRGB(160,50,50) or Color3.fromRGB(50,160,50)
-		end)
-		clearBtn.MouseButton1Click:Connect(function()
-			RemoteSpy.ClearLogs()
-			rebuildList()
-		end)
-		saveBtn.MouseButton1Click:Connect(function() RemoteSpy.SaveLogs() end)
-
-		-- List
-		listFrame = Instance.new("ScrollingFrame",content)
-		listFrame.Size = UDim2.new(1,0,1,-30)
-		listFrame.Position = UDim2.new(0,0,0,30)
-		listFrame.BackgroundColor3 = Color3.fromRGB(32,32,32)
-		listFrame.BorderSizePixel = 0
-		listFrame.ScrollBarThickness = 5
-		listFrame.ScrollBarImageColor3 = Color3.fromRGB(80,80,80)
-		listFrame.CanvasSize = UDim2.new(0,0,0,0)
-
-		-- Hook OnLog to update in real time
-		RemoteSpy.OnLog(function(entry)
-			if paused then return end
-			rebuildList()
-		end)
-
-		rebuildList()
-	end
-
-	RemoteSpy.Window = {
-		Show = function()
-			buildWindow()
-			if window then window:Show() end
-		end,
-		Hide = function()
-			if window then window:Hide() end
-		end,
-		OnActivate   = Lib.Signal.new(),
-		OnDeactivate = Lib.Signal.new(),
-	}
-
-	return RemoteSpy
-end
-
-return {
-	InitDeps       = initDeps,
-	InitAfterMain  = initAfterMain,
-	Main           = main
-}
-
-
-end,
-["Terminal"] = function()
---[[
-	Terminal Module
-	Interactive command-line interface for navigating and inspecting the game
-	Commands: ls, cd, cat, find, attr, remotes, props, exec, tp, kill, copy, clear, help
-]]
-
--- Common Locals
-local Main,Lib,Apps,Settings
-local Explorer, Properties, ScriptViewer, Notebook
-local API,RMD,env,service,plr,create,createSimple
-
-local function initDeps(data)
-	Main = data.Main; Lib = data.Lib; Apps = data.Apps; Settings = data.Settings
-	API = data.API; RMD = data.RMD; env = data.env; service = data.service
-	plr = data.plr; create = data.create; createSimple = data.createSimple
-end
-
-local function initAfterMain()
-	Explorer = Apps.Explorer; Properties = Apps.Properties
-	ScriptViewer = Apps.ScriptViewer; Notebook = Apps.Notebook
-end
-
-local function main()
-	local Terminal = {}
-
-	-- -- State ------------------------------------------------------------
-	local cwd = game  -- current working directory (Instance)
-	local history = {}
-	local historyIdx = 0
-	local outputLines = {}
-	local MAX_LINES = 300
-
-	-- -- Value serializer -------------------------------------------------
-	local function sv(v)
-		local t = typeof(v)
-		if t=="string"  then return '"'..v:sub(1,60)..'"'
-		elseif t=="number"  then return tostring(v)
-		elseif t=="boolean" then return tostring(v)
-		elseif t=="Vector3" then return ("<%g,%g,%g>"):format(v.X,v.Y,v.Z)
-		elseif t=="Color3"  then return ("rgb(%d,%d,%d)"):format(v.R*255,v.G*255,v.B*255)
-		elseif t=="EnumItem" then return tostring(v)
-		elseif t=="Instance" then
-			local ok,fn=pcall(function() return v:GetFullName() end)
-			return ok and fn or v.Name
-		else return "["..t.."]" end
-	end
-
-	-- -- Output ------------------------------------------------------------
-	local outputCallback = nil
-
-	local function println(text, color)
-		color = color or Color3.fromRGB(220,220,220)
-		local line = {text=text, color=color}
-		table.insert(outputLines, line)
-		if #outputLines > MAX_LINES then table.remove(outputLines,1) end
-		if outputCallback then outputCallback(line) end
-	end
-
-	local function printOk(t)   println(t, Color3.fromRGB(100,255,140)) end
-	local function printErr(t)  println("ERROR: "..t, Color3.fromRGB(255,80,80)) end
-	local function printInfo(t) println(t, Color3.fromRGB(150,200,255)) end
-	local function printWarn(t) println("WARN: "..t, Color3.fromRGB(255,200,60)) end
-
-	-- -- Path resolver -----------------------------------------------------
-	local function resolvePath(path)
-		if path == nil or path == "" then return cwd end
-		if path == "/" then return game end
-		if path == ".." then
-			local ok,par = pcall(function() return cwd.Parent end)
-			return (ok and par) and par or cwd
-		end
-		-- Absolute
-		local target = cwd
-		if path:sub(1,1) == "/" then
-			target = game
-			path = path:sub(2)
-		end
-		for seg in path:gmatch("[^/]+") do
-			if seg == ".." then
-				local ok,par = pcall(function() return target.Parent end)
-				if ok and par then target = par end
-			elseif seg ~= "." then
-				local ok,child = pcall(function() return target:FindFirstChild(seg) end)
-				if ok and child then
-					target = child
-				else
-					-- Try FindService
-					local sok,svc = pcall(function() return game:GetService(seg) end)
-					if sok and svc then target = svc
-					else return nil, "Not found: "..seg end
-				end
-			end
-		end
-		return target
-	end
-
-	-- -- Commands ----------------------------------------------------------
-	local commands = {}
-
-	commands.help = {
-		desc = "List commands",
-		run = function(args)
-			println("=== DEX TERMINAL COMMANDS ===", Color3.fromRGB(255,200,60))
-			local sorted = {}
-			for k,v in pairs(commands) do sorted[#sorted+1]={k,v.desc} end
-			table.sort(sorted,function(a,b) return a[1]<b[1] end)
-			for _,pair in ipairs(sorted) do
-				println(("  %-12s %s"):format(pair[1], pair[2]), Color3.fromRGB(200,200,200))
-			end
-		end
-	}
-
-	commands.ls = {
-		desc = "ls [path] -- list children",
-		run = function(args)
-			local target,err = resolvePath(args[1])
-			if not target then printErr(err or "bad path"); return end
-			local ok,children = pcall(function() return target:GetChildren() end)
-			if not ok then printErr("Cannot list: "..tostring(children)); return end
-			printInfo("["..target.ClassName.."] "..target:GetFullName().." ("..#children.." children)")
-			for _,child in ipairs(children) do
-				local extra = ""
-				pcall(function()
-					if child:IsA("BasePart") then
-						extra = " pos="..sv(child.Position)
-					elseif child:IsA("StringValue") or child:IsA("NumberValue") or child:IsA("BoolValue") then
-						extra = " val="..sv(child.Value)
-					end
-				end)
-				println("  ["..child.ClassName.."] "..child.Name..extra)
-			end
-		end
-	}
-
-	commands.cd = {
-		desc = "cd <path> -- change directory",
-		run = function(args)
-			local target,err = resolvePath(args[1])
-			if not target then printErr(err or "bad path"); return end
-			cwd = target
-			printOk("cwd -> "..cwd:GetFullName())
-		end
-	}
-
-	commands.pwd = {
-		desc = "pwd -- print current path",
-		run = function(args)
-			printInfo(cwd:GetFullName())
-		end
-	}
-
-	commands.cat = {
-		desc = "cat <path> -- show script source or value",
-		run = function(args)
-			local target,err = resolvePath(args[1])
-			if not target then printErr(err or "bad path"); return end
-			local cn = target.ClassName
-			if cn=="Script" or cn=="LocalScript" or cn=="ModuleScript" then
-				local src = ""
-				local ok = pcall(function() src = target.Source end)
-				if not ok or src=="" then
-					if env.decompile then
-						local dok, dec = pcall(env.decompile, target)
-						if dok then src = dec end
-					end
-				end
-				if src=="" then printWarn("Source not available"); return end
-				local lines = src:split("\n")
-				for i,line in ipairs(lines) do
-					if i>200 then println("... ("..(#lines-200).." more lines)"); break end
-					println(string.format("%4d | %s",i,line), Color3.fromRGB(173,241,149))
-				end
-			else
-				local ok,val = pcall(function() return target.Value end)
-				if ok then println(target.Name.." = "..sv(val))
-				else printErr("Not a script or value: "..cn) end
-			end
-		end
-	}
-
-	commands.find = {
-		desc = "find <name> [path] -- find descendants by name",
-		run = function(args)
-			if not args[1] then printErr("Usage: find <name> [path]"); return end
-			local root,err = resolvePath(args[2])
-			if not root then root = cwd end
-			local name = args[1]:lower()
-			local count = 0
-			local ok,_ = pcall(function()
-				for _,inst in ipairs(root:GetDescendants()) do
-					if inst.Name:lower():find(name,1,true) then
-						println("  "..inst:GetFullName().." ["..inst.ClassName.."]")
-						count = 						count + 1
-						if count >= 100 then println("  ... (limit 100)"); return end
-					end
-				end
-			end)
-			printInfo(count.." results")
-		end
-	}
-
-	commands.attr = {
-		desc = "attr [path] -- show attributes",
-		run = function(args)
-			local target,err = resolvePath(args[1])
-			if not target then printErr(err or "bad path"); return end
-			local ok,attrs = pcall(function() return target:GetAttributes() end)
-			if not ok or not attrs then printErr("No attributes"); return end
-			local any = false
-			for k,v in pairs(attrs) do
-				println("  "..k.." = "..sv(v))
-				any = true
-			end
-			if not any then printWarn("No attributes on "..target.Name) end
-		end
-	}
-
-	commands.remotes = {
-		desc = "remotes [path] -- list all remotes under path",
-		run = function(args)
-			local root,err = resolvePath(args[1])
-			if not root then root = game end
-			local count = 0
-			pcall(function()
-				for _,inst in ipairs(root:GetDescendants()) do
-					local cn = inst.ClassName
-					if cn=="RemoteEvent" or cn=="RemoteFunction"
-					or cn=="BindableEvent" or cn=="BindableFunction" then
-						println("  ["..cn.."] "..inst:GetFullName())
-						count = 						count + 1
-					end
-				end
-			end)
-			printInfo(count.." remotes found")
-		end
-	}
-
-	commands.props = {
-		desc = "props [path] -- show key properties",
-		run = function(args)
-			local target,err = resolvePath(args[1])
-			if not target then printErr(err or "bad path"); return end
-			printInfo("["..target.ClassName.."] "..target:GetFullName())
-			if API and API.GetMember then
-				local props = API.GetMember(target.ClassName,"Properties")
-				if props then
-					for _,prop in ipairs(props) do
-						if not prop.Tags.WriteOnly and not prop.Tags.Hidden then
-							local ok,v = pcall(function() return target[prop.Name] end)
-							if ok and v~=nil then
-								println("  "..prop.Name.." = "..sv(v))
-							end
-						end
-					end
-					return
-				end
-			end
-			-- Fallback hardcoded
-			local tryProps = {"Position","Size","Color","Transparency","Anchored","Name","ClassName","Enabled","Visible","Text","Value","Health","MaxHealth","WalkSpeed"}
-			for _,p in ipairs(tryProps) do
-				local ok,v = pcall(function() return target[p] end)
-				if ok then println("  "..p.." = "..sv(v)) end
-			end
-		end
-	}
-
-	commands.exec = {
-		desc = "exec <lua code> -- execute lua (uses loadstring)",
-		run = function(args)
-			if not args[1] then printErr("Usage: exec <code>"); return end
-			local code = table.concat(args," ")
-			local ok,err = pcall(function()
-				local fn,lerr = loadstring(code)
-				if not fn then error(lerr) end
-				local res = {fn()}
-				if #res > 0 then
-					local parts = {}
-					for _,v in ipairs(res) do parts[#parts+1]=sv(v) end
-					printOk("-> "..table.concat(parts,", "))
-				end
-			end)
-			if not ok then printErr(tostring(err)) end
-		end
-	}
-
-	commands.tp = {
-		desc = "tp <path> -- teleport to instance position",
-		run = function(args)
-			local target,err = resolvePath(args[1])
-			if not target then printErr(err or "bad path"); return end
-			local char = plr.Character
-			if not char then printErr("No character"); return end
-			local hrp = char:FindFirstChild("HumanoidRootPart")
-			if not hrp then printErr("No HumanoidRootPart"); return end
-			local ok,pos = pcall(function()
-				if target:IsA("BasePart") then return target.Position
-				elseif target:IsA("Model") and target.PrimaryPart then return target.PrimaryPart.Position
-				else error("not a part") end
-			end)
-			if not ok then printErr("Target has no position"); return end
-			hrp.CFrame = CFrame.new(pos + Vector3.new(0,5,0))
-			printOk("Teleported to "..tostring(pos))
-		end
-	}
-
-	commands.kill = {
-		desc = "kill [path] -- destroy instance (careful!)",
-		run = function(args)
-			local target,err = resolvePath(args[1])
-			if not target then printErr(err or "bad path"); return end
-			if target == game or target == workspace then printErr("Cannot destroy root"); return end
-			local name = target:GetFullName()
-			pcall(function() target:Destroy() end)
-			printWarn("Destroyed: "..name)
-		end
-	}
-
-	commands.copy = {
-		desc = "copy <path> -- copy full path to clipboard",
-		run = function(args)
-			local target,err = resolvePath(args[1])
-			if not target then printErr(err or "bad path"); return end
-			local path = target:GetFullName()
-			if env.setclipboard then env.setclipboard(path) end
-			printOk("Copied: "..path)
-		end
-	}
-
-	commands.clear = {
-		desc = "clear -- clear terminal output",
-		run = function(args)
-			for i=#outputLines,1,-1 do outputLines[i]=nil end
-			if outputCallback then outputCallback(nil) end -- signal clear
-		end
-	}
-
-	commands.services = {
-		desc = "services -- list all GetService services",
-		run = function(args)
-			local svcNames = {
-				"Workspace","Players","ReplicatedStorage","ReplicatedFirst",
-				"ServerStorage","ServerScriptService","StarterGui","StarterPack",
-				"StarterPlayer","Teams","SoundService","Lighting","HttpService",
-				"TeleportService","TextService","TweenService","UserInputService",
-				"RunService","CoreGui","LocalizationService","AnalyticsService",
-				"AssetService","BadgeService","ChatService","CollectionService",
-				"ContextActionService","DataStoreService","GuiService","HapticService",
-				"KeyframeSequenceProvider","LogService","MarketplaceService",
-				"NetworkClient","PathfindingService","PhysicsService","PointsService",
-				"PolicyService","ProximityPromptService","ScriptContext","SelectionService",
-				"StatsService","VRService"
-			}
-			for _,name in ipairs(svcNames) do
-				local ok,svc = pcall(function() return game:GetService(name) end)
-				if ok and svc then
-					local childCount = 0
-					pcall(function() childCount = #svc:GetChildren() end)
-					println("  "..name.." ("..childCount.." children)")
-				end
-			end
-		end
-	}
-
-	commands.gc = {
-		desc = "gc -- scan GC for hidden instances",
-		run = function(args)
-			if not env.getgc then printErr("getgc not available"); return end
-			local ok,gc = pcall(env.getgc, true)
-			if not ok then printErr("getgc failed"); return end
-			local found = 0
-			for _,v in ipairs(gc) do
-				if typeof(v)=="Instance" then
-					local pok, parent = pcall(function() return v.Parent end)
-					if pok and parent == nil then
-						println("  [nil parent] ["..v.ClassName.."] "..v.Name)
-						found = 						found + 1
-						if found >= 50 then println("  ... (limit 50)"); break end
-					end
-				end
-			end
-			printInfo(found.." nil-parent instances in GC")
-		end
-	}
-
-	-- -- Parser ------------------------------------------------------------
-	local function parseInput(input)
-		local parts = {}
-		-- Handle quoted strings
-		for token in input:gmatch('[^%s"]+|"[^"]*"') do
-			parts[#parts+1] = token:gsub('"','')
-		end
-		-- Fallback simple split
-		if #parts == 0 then
-			for token in input:gmatch("%S+") do
-				parts[#parts+1] = token
-			end
-		end
-		return parts
-	end
-
-	Terminal.RunCommand = function(input)
-		input = input:match("^%s*(.-)%s*$") -- trim
-		if input == "" then return end
-
-		-- History
-		table.insert(history, 1, input)
-		if #history > 100 then table.remove(history) end
-		historyIdx = 0
-
-		println("> "..input, Color3.fromRGB(255,220,100))
-
-		local parts = parseInput(input)
-		local cmdName = parts[1]
-		local args = {}
-		for i=2,#parts do args[i-1]=parts[i] end
-
-		local cmd = commands[cmdName]
-		if cmd then
-			local ok,err = pcall(cmd.run, args)
-			if not ok then printErr(tostring(err)) end
-		else
-			printErr("Unknown command '"..tostring(cmdName).."'. Type 'help'.")
-		end
-	end
-
-	Terminal.GetHistory = function(dir)
-		historyIdx = math.clamp(historyIdx + dir, 0, #history)
-		return history[historyIdx] or ""
-	end
-
-	Terminal.SetOutputCallback = function(cb)
-		outputCallback = cb
-	end
-
-	Terminal.GetLines = function() return outputLines end
-
-	-- -- Window ------------------------------------------------------------
-	local window = nil
-	local outputScrollFrame = nil
-	local rowPool = {}
-
-	local function getPromptText()
-		local ok,fn = pcall(function() return cwd:GetFullName() end)
-		return (ok and fn or "game").." $ "
-	end
-
-	local function addOutputLine(line)
-		if not outputScrollFrame then return end
-		if line == nil then
-			-- clear
-			for _,row in ipairs(rowPool) do
-				if row.inst then row.inst:Destroy() end
-			end
-			rowPool = {}
-			outputScrollFrame.CanvasSize = UDim2.new(0,0,0,0)
-			return
-		end
-		local y = #rowPool * 14
-		local lbl = Instance.new("TextLabel")
-		lbl.Size = UDim2.new(1,-4,0,14)
-		lbl.Position = UDim2.new(0,2,0,y)
-		lbl.BackgroundTransparency = 1
-		lbl.TextColor3 = line.color
-		lbl.Font = Enum.Font.Code
-		lbl.TextSize = 12
-		lbl.Text = line.text
-		lbl.TextXAlignment = Enum.TextXAlignment.Left
-		lbl.TextTruncate = Enum.TextTruncate.AtEnd
-		lbl.Parent = outputScrollFrame
-		rowPool[#rowPool+1] = {inst=lbl}
-		outputScrollFrame.CanvasSize = UDim2.new(0,0,0,(#rowPool+1)*14)
-		outputScrollFrame.CanvasPosition = Vector2.new(0,(#rowPool+1)*14)
-	end
-
-	local function buildWindow()
-		if window then return end
-		window = Lib.Window.new()
-		window:SetTitle("Terminal")
-		window:SetSize(600, 400)
-		local content = window:GetContent()
-
-		-- Output area
-		outputScrollFrame = Instance.new("ScrollingFrame",content)
-		outputScrollFrame.Size = UDim2.new(1,0,1,-30)
-		outputScrollFrame.BackgroundColor3 = Color3.fromRGB(18,18,18)
-		outputScrollFrame.BorderSizePixel = 0
-		outputScrollFrame.ScrollBarThickness = 5
-		outputScrollFrame.ScrollBarImageColor3 = Color3.fromRGB(80,80,80)
-		outputScrollFrame.CanvasSize = UDim2.new(0,0,0,0)
-
-		-- Input bar
-		local inputBar = Instance.new("Frame",content)
-		inputBar.Size = UDim2.new(1,0,0,28)
-		inputBar.Position = UDim2.new(0,0,1,-28)
-		inputBar.BackgroundColor3 = Color3.fromRGB(28,28,28)
-		inputBar.BorderSizePixel = 0
-
-		local promptLbl = Instance.new("TextLabel",inputBar)
-		promptLbl.Size = UDim2.new(0,200,1,0)
-		promptLbl.BackgroundTransparency = 1
-		promptLbl.TextColor3 = Color3.fromRGB(100,255,140)
-		promptLbl.Font = Enum.Font.Code
-		promptLbl.TextSize = 11
-		promptLbl.TextXAlignment = Enum.TextXAlignment.Left
-		promptLbl.Text = getPromptText()
-		promptLbl.TextTruncate = Enum.TextTruncate.AtEnd
-
-		local inputBox = Instance.new("TextBox",inputBar)
-		inputBox.Size = UDim2.new(1,-205,1,-4)
-		inputBox.Position = UDim2.new(0,200,0,2)
-		inputBox.BackgroundColor3 = Color3.fromRGB(30,30,30)
-		inputBox.TextColor3 = Color3.fromRGB(220,220,220)
-		inputBox.PlaceholderText = "type command... (help for list)"
-		inputBox.Font = Enum.Font.Code
-		inputBox.TextSize = 12
-		inputBox.BorderSizePixel = 0
-		inputBox.ClearTextOnFocus = false
-		inputBox.Text = ""
-		Instance.new("UICorner",inputBox).CornerRadius = UDim.new(0,4)
-
-		Terminal.SetOutputCallback(function(line)
-			addOutputLine(line)
-			promptLbl.Text = getPromptText()
-		end)
-
-		-- Print startup message
-		println("DEX Terminal -- type 'help' for commands", Color3.fromRGB(255,220,60))
-		println("cwd: "..cwd:GetFullName(), Color3.fromRGB(150,200,255))
-		for _,line in ipairs(outputLines) do
-			addOutputLine(line)
-		end
-
-		inputBox.FocusLost:Connect(function(enterPressed)
-			if enterPressed then
-				local txt = inputBox.Text
-				inputBox.Text = ""
-				Terminal.RunCommand(txt)
-			end
-		end)
-
-		-- Up/down history
-		service.UserInputService.InputBegan:Connect(function(input, gp)
-			if gp then return end
-			if not inputBox:IsFocused() then return end
-			if input.KeyCode == Enum.KeyCode.Up then
-				inputBox.Text = Terminal.GetHistory(1)
-			elseif input.KeyCode == Enum.KeyCode.Down then
-				inputBox.Text = Terminal.GetHistory(-1)
-			end
-		end)
-	end
-
-	Terminal.Window = {
-		Show = function()
-			buildWindow()
-			if window then window:Show() end
-		end,
-		Hide = function()
-			if window then window:Hide() end
-		end,
-		OnActivate   = Lib.Signal.new(),
-		OnDeactivate = Lib.Signal.new(),
-	}
-
-	return Terminal
-end
-
-return {
-	InitDeps       = initDeps,
-	InitAfterMain  = initAfterMain,
-	Main           = main
-}
-
-
-end,
 ["Lib"] = function()
 --[[
 	Lib Module
@@ -1835,7 +784,8 @@ local function main()
 			--local thumbSelectColor = Color3.new(140/255,140/255,140/255)
 			button1.InputBegan:Connect(function(input)
 				if input.UserInputType == Enum.UserInputType.MouseMovement and not buttonPress and self:CanScrollUp() then button1.BackgroundTransparency = 0.8 end
-				if input.UserInputType ~= Enum.UserInputType.MouseButton1 or not self:CanScrollUp() then return end
+				local isClick1 = input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+				if not isClick1 or not self:CanScrollUp() then return end
 				buttonPress = true
 				button1.BackgroundTransparency = 0.5
 				if self:CanScrollUp() then self:ScrollUp() self.Scrolled:Fire() end
@@ -1860,7 +810,8 @@ local function main()
 			end)
 			button2.InputBegan:Connect(function(input)
 				if input.UserInputType == Enum.UserInputType.MouseMovement and not buttonPress and self:CanScrollDown() then button2.BackgroundTransparency = 0.8 end
-				if input.UserInputType ~= Enum.UserInputType.MouseButton1 or not self:CanScrollDown() then return end
+				local isClick2 = input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+				if not isClick2 or not self:CanScrollDown() then return end
 				buttonPress = true
 				button2.BackgroundTransparency = 0.5
 				if self:CanScrollDown() then self:ScrollDown() self.Scrolled:Fire() end
@@ -1909,9 +860,10 @@ local function main()
 				self:Update()
 
 				mouseEvent = user.InputChanged:Connect(function(input)
-					if input.UserInputType == Enum.UserInputType.MouseMovement and thumbPress and releaseEvent.Connected then
+					local isMoveType = input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
+					if isMoveType and thumbPress and releaseEvent.Connected then
 						local thumbFrameSize = scrollThumbFrame.AbsoluteSize[dir]-scrollThumb.AbsoluteSize[dir]
-						local pos = mouse[dir] - scrollThumbFrame.AbsolutePosition[dir] - mouseOffset
+						local pos = input.Position[dir] - scrollThumbFrame.AbsolutePosition[dir] - mouseOffset
 						if pos > thumbFrameSize then
 							pos = thumbFrameSize
 						elseif pos < 0 then
@@ -2319,7 +1271,7 @@ local function main()
 					guiDragging = true
 
 					releaseEvent = game:GetService("UserInputService").InputEnded:Connect(function(input)
-						if input.UserInputType == Enum.UserInputType.MouseButton1 then
+						if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
 							releaseEvent:Disconnect()
 							mouseEvent:Disconnect()
 							guiDragging = false
@@ -2332,7 +1284,8 @@ local function main()
 					end)
 
 					mouseEvent = game:GetService("UserInputService").InputChanged:Connect(function(input)
-						if input.UserInputType == Enum.UserInputType.MouseMovement and self.Draggable and not self.Closed then
+						local isMoveType = input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch
+						if isMoveType and self.Draggable and not self.Closed then
 							if self.Aligned then
 								if leftSide.Resizing or rightSide.Resizing then return end
 								local posX,posY = input.Position.X-offX,input.Position.Y-offY
@@ -2401,7 +1354,8 @@ local function main()
 			end)
 
 			guiMain.InputBegan:Connect(function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 and not self.Aligned and not self.Closed then
+				local isTap = input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
+				if isTap and not self.Aligned and not self.Closed then
 					moveToTop(self)
 				end
 			end)
@@ -2976,6 +1930,7 @@ local function main()
 			sideDisplayOrder = Main.DisplayOrders.SideWindow
 
 			sidesGui = Instance.new("ScreenGui")
+			sidesGui.IgnoreGuiInset = true
 			local leftFrame = create({
 				{1,"Frame",{Active=true,Name="LeftSide",BackgroundColor3=Color3.new(0.17647059261799,0.17647059261799,0.17647059261799),BorderSizePixel=0,}},
 				{2,"TextButton",{AutoButtonColor=false,BackgroundColor3=Color3.new(0.2549019753933,0.2549019753933,0.2549019753933),BorderSizePixel=0,Font=3,Name="Resizer",Parent={1},Size=UDim2.new(0,5,1,0),Text="",TextColor3=Color3.new(0,0,0),TextSize=14,}},
@@ -3015,10 +1970,10 @@ local function main()
 			local corner = Instance.new("UICorner",indicator)
 			corner.CornerRadius = UDim.new(0,10)
 
-			local leftToggle = create({{1,"TextButton",{AutoButtonColor=false,BackgroundColor3=Color3.new(0.20392157137394,0.20392157137394,0.20392157137394),BorderColor3=Color3.new(0.14117647707462,0.14117647707462,0.14117647707462),BorderMode=2,Font=10,Name="LeftToggle",Position=UDim2.new(0,0,0,-36),Size=UDim2.new(0,16,0,36),Text="<",TextColor3=Color3.new(1,1,1),TextSize=14,}}})
+			local leftToggle = create({{1,"TextButton",{AutoButtonColor=false,BackgroundColor3=Color3.new(0.20392157137394,0.20392157137394,0.20392157137394),BorderColor3=Color3.new(0.14117647707462,0.14117647707462,0.14117647707462),BorderMode=2,Font=10,Name="LeftToggle",Position=UDim2.new(0,0,0,-36),Size=UDim2.new(0,36,0,50),Text="<",TextColor3=Color3.new(1,1,1),TextSize=18,}}})
 			local rightToggle = leftToggle:Clone()
 			rightToggle.Name = "RightToggle"
-			rightToggle.Position = UDim2.new(1,-16,0,-36)
+			rightToggle.Position = UDim2.new(1,-36,0,-50)
 			Lib.ButtonAnim(leftToggle,{Mode = 2,PressColor = Color3.fromRGB(32,32,32)})
 			Lib.ButtonAnim(rightToggle,{Mode = 2,PressColor = Color3.fromRGB(32,32,32)})
 
@@ -8926,6 +7881,27 @@ return search]==]
 			Explorer.Index = scrollV.Index
 			Explorer.Refresh()
 		end)
+		-- Mobile touch swipe scroll for Explorer tree
+		do
+			local touchStartY, lastTouchY, accum = 0, 0, 0
+			treeFrame.InputBegan:Connect(function(inp)
+				if inp.UserInputType == Enum.UserInputType.Touch then
+					touchStartY = inp.Position.Y; lastTouchY = touchStartY; accum = 0
+				end
+			end)
+			treeFrame.InputChanged:Connect(function(inp)
+				if inp.UserInputType == Enum.UserInputType.Touch then
+					local delta = lastTouchY - inp.Position.Y
+					lastTouchY = inp.Position.Y
+					accum = accum + delta
+					local steps = math.floor(accum / 20)
+					if steps ~= 0 then
+						accum = accum - steps * 20
+						scrollV:ScrollTo(scrollV.Index + steps)
+					end
+				end
+			end)
+		end
 
 		scrollH = Lib.ScrollBar.new(true)
 		scrollH.Increment = 5
@@ -11030,6 +10006,27 @@ local function main()
 			Properties.Index = scrollV.Index
 			Properties.Refresh()
 		end)
+		-- Mobile touch swipe scroll for Properties
+		do
+			local touchStartY2, lastTouchY2, accum2 = 0, 0, 0
+			propsFrame.InputBegan:Connect(function(inp)
+				if inp.UserInputType == Enum.UserInputType.Touch then
+					touchStartY2 = inp.Position.Y; lastTouchY2 = touchStartY2; accum2 = 0
+				end
+			end)
+			propsFrame.InputChanged:Connect(function(inp)
+				if inp.UserInputType == Enum.UserInputType.Touch then
+					local delta2 = lastTouchY2 - inp.Position.Y
+					lastTouchY2 = inp.Position.Y
+					accum2 = accum2 + delta2
+					local steps2 = math.floor(accum2 / 20)
+					if steps2 ~= 0 then
+						accum2 = accum2 - steps2 * 20
+						scrollV:ScrollTo(scrollV.Index + steps2)
+					end
+				end
+			end)
+		end
 
 		scrollH = Lib.ScrollBar.new(true)
 		scrollH.Increment = 5
@@ -11063,22 +10060,20 @@ end
 end,
 }
 --[[
-	New Dex -- Enhanced Edition
+	New Dex -- Enhanced Edition v2.0
 	Original by Moon | Extended build
-	
-	Added in this build:
-	  * Ultimate DumpGame -- full API property dump, attributes,
-	    script decompile/save, GC scan, nil instances, remotes summary,
-	    upvalues/constants (opt-in), loadedmodules, player/workspace attrs
-	  * RemoteSpy -- hooks all RE/RF/BE/BF, live log, filter, clipboard copy
-	  * Terminal -- ls/cd/cat/find/attr/remotes/props/exec/tp/gc/services/kill
+
+	Features:
+	  * Ultimate DumpGame v2 -- all useful services, smart filtering,
+	    CollectionService tags, Lighting, Teams, Sounds, player data,
+	    GC hidden instances, nil instances, loaded modules, remotes,
+	    decompile+save scripts, chunked flush (no crashes)
+	    teams, players, lighting, clscount, values, spy control
 	  * Click-to-Select -- click 3D part -> selects in Explorer
-	  * Settings GUI -- toggle all new features, save to DexSettings.json
-	  * Save Instance -- binary saveinstance alongside text dump
+	  * Settings GUI -- toggle all features, save to DexSettings.json
 ]]
 
--- Main vars
-local Main, Explorer, Properties, ScriptViewer, RemoteSpy, Terminal
+local Main, Explorer, Properties, ScriptViewer
 local DefaultSettings, Notebook, Serializer, Lib
 local API, RMD
 
@@ -11111,12 +10106,16 @@ DefaultSettings = (function()
 		},
 		Dump = {
 			_Recurse = true,
-			SaveScripts    = true,
+			SaveScripts      = true,
 			DecompileScripts = true,
-			DumpAttributes = true,
-			ScanGC         = true,
+			DumpAttributes   = true,
+			ScanGC           = true,
 			ScanNilInstances = true,
 			ScanLoadedModules = true,
+			DumpLighting     = true,
+			DumpTeams        = true,
+			DumpSounds       = true,
+			DumpTags         = true,
 		},
 		Theme = {
 			_Recurse = true,
@@ -11194,10 +10193,10 @@ end
 Main = (function()
 	local Main = {}
 
-	Main.ModuleList  = {"Explorer","Properties","ScriptViewer","RemoteSpy","Terminal"}
+	Main.ModuleList  = {"Explorer","Properties","ScriptViewer"}
 	Main.Elevated    = false
 	Main.MissingEnv  = {}
-	Main.Version     = "Enhanced 1.2.0"
+	Main.Version     = "Enhanced 2.0"
 	Main.Mouse       = plr:GetMouse()
 	Main.AppControls = {}
 	Main.Apps        = Apps
@@ -11273,12 +10272,10 @@ Main = (function()
 		Explorer    = Apps.Explorer
 		Properties  = Apps.Properties
 		ScriptViewer= Apps.ScriptViewer
-		RemoteSpy   = Apps.RemoteSpy
-		Terminal    = Apps.Terminal
 		Notebook    = Apps.Notebook
 		local appTable = {
 			Explorer=Explorer,Properties=Properties,ScriptViewer=ScriptViewer,
-			Notebook=Notebook,RemoteSpy=RemoteSpy,Terminal=Terminal,
+			Notebook=Notebook,
 		}
 		Main.AppControls.Lib.InitAfterMain(appTable)
 		for _,v in pairs(Main.ModuleList) do
@@ -11719,7 +10716,7 @@ Main = (function()
 		Main.MainGui.OpenButton.Text=val and "X" or "Dex"
 		if val then Main.MainGui.OpenButton.MainFrame.Visible=true end
 		Main.MainGui.OpenButton.MainFrame:TweenSize(
-			val and UDim2.new(0,224,0,280) or UDim2.new(0,0,0,0),
+			val and UDim2.new(0,224,0,300) or UDim2.new(0,0,0,0),
 			Enum.EasingDirection.Out,Enum.EasingStyle.Quad,.2,true)
 		service.TweenService:Create(Main.MainGui.OpenButton,
 			TweenInfo.new(.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out),
@@ -11744,131 +10741,97 @@ Main = (function()
 		end
 	end
 
-	-- ????????????????????????????????????????????????????????????????????
-	-- ?              ULTIMATE DUMP -- Best & most complete                ?
-	-- ????????????????????????????????????????????????????????????????????
+	-- ======================================================================
+	-- ULTIMATE DUMP v2
+	-- ======================================================================
 	Main.DumpGame = function()
-		if not env.writefile then warn("[Dex] writefile unavailable"); return end
+		if not env.writefile then warn("[Dex] writefile unavailable -- dump aborted"); return end
 
 		local TS      = tostring(math.floor(tick()))
 		local txtFile = "dex/saved/dump_"..TS..".txt"
 		local sDir    = "dex/saved/scripts_"..TS
 		pcall(env.makefolder, sDir)
 
-		-- Hard cap -- bail if the game is massive
-		local INST_LIMIT  = math.huge
-		local YIELD_EVERY = 10    -- task.wait() every N instances (lower = smoother on mobile)
+		-- Safety caps
+		local YIELD_EVERY = 8   -- task.wait() every N instances (lower = safer)
+		local MAX_DEPTH   = 18  -- max tree depth
 		local instCount   = 0
-		local limitHit    = false
 
-		-- -- Noise: skip entire subtree for these classes ----------------
-		-- These are pure rig/engine internals with zero useful info
+		-- Classes to skip entirely (no useful game-logic info)
 		local SKIP_CLASS = {
-			-- Rig joints & mesh
 			Motor6D=true, Bone=true, WeldConstraint=true, Weld=true,
 			RigidConstraint=true, NoCollisionConstraint=true,
 			SpecialMesh=true, DataModelMesh=true, BlockMesh=true,
 			CylinderMesh=true, FileMesh=true,
-			-- Animation
 			Animator=true, AnimationController=true,
-			-- Decorative / engine-only
-			ForceField=true, SelectionSphere=true, SelectionPartLasso=true,
-			SelectionPointLasso=true, SelectionBox=true,
-			ArcHandles=true, Handles=true, SurfaceSelection=true,
-			-- Constraints (physics noise)
+			ForceField=true, SelectionSphere=true, SelectionBox=true,
+			ArcHandles=true, Handles=true,
 			BallSocketConstraint=true, HingeConstraint=true,
 			PrismaticConstraint=true, RodConstraint=true,
 			RopeConstraint=true, SpringConstraint=true,
 			TorsionSpringConstraint=true, UniversalConstraint=true,
 			PlaneConstraint=true, LinearVelocity=true, AngularVelocity=true,
-			-- Attachments (just positions, not useful at scale)
 			Attachment=true,
-			-- Skin/texture noise
 			Decal=true, Texture=true, SurfaceAppearance=true,
-			-- Fire/smoke/sparkles
 			Fire=true, Smoke=true, Sparkles=true,
 		}
 
-		-- Skip entire subtree if name matches
-		local SKIP_SUBTREE_NAME = {
+		-- Subtree names to skip
+		local SKIP_NAME = {
 			Animate=true, RigAttachments=true, AvatarPartScaleType=true,
-			-- Character body parts
-			HumanoidRootPart=true, LeftUpperArm=true, RightUpperArm=true,
-			LeftLowerArm=true, RightLowerArm=true, LeftHand=true, RightHand=true,
-			LeftUpperLeg=true, RightUpperLeg=true, LeftLowerLeg=true, RightLowerLeg=true,
-			LeftFoot=true, RightFoot=true, UpperTorso=true, LowerTorso=true,
-			Head=true,
-			-- Roblox internal UI frameworks (thousands of instances, zero game logic)
 			PlayerModule=true, RbxCharacterSounds=true, AtomicBinding=true,
 			TopbarStandard=true, TopbarStandardClipped=true,
 			TopbarPlusGui=true, TopbarPlusReference=true,
-			CorePackages=true, CoreGui=true, RobloxGui=true,
+			CorePackages=true,
 		}
 
-		-- Skip instance if its parent's class is one of these
-		local SKIP_IF_PARENT_CLASS = {
-			Animation=true, CharacterMesh=true,
-		}
-
-		-- Classes where we dump ONLY the properties listed (no full API walk)
-		-- Keeps output tight for common/noisy classes
+		-- Classes with SHORT property dump (avoid 60-prop spam per part)
 		local LITE_PROPS = {
-			-- Parts: just position/size/color (no 60-prop dump per part)
-			Part         = {"Position","Size","Color","Transparency","Anchored","CanCollide"},
-			MeshPart     = {"Position","Size","Color","Transparency","Anchored","CanCollide"},
-			UnionOperation={"Position","Size","Color","Transparency","Anchored"},
-			WedgePart    = {"Position","Size","Color","Transparency","Anchored"},
+			Part          = {"Position","Size","Color","Transparency","Anchored","CanCollide"},
+			MeshPart      = {"Position","Size","Color","Transparency","Anchored","CanCollide"},
+			UnionOperation= {"Position","Size","Color","Transparency","Anchored"},
+			WedgePart     = {"Position","Size","Color","Transparency","Anchored"},
 			CornerWedgePart={"Position","Size","Color","Transparency","Anchored"},
-			TrussPart    = {"Position","Size","Color","Transparency","Anchored"},
-			-- Humanoid
-			Humanoid     = {"Health","MaxHealth","WalkSpeed","JumpPower","DisplayName","RigType"},
-			-- GUI (high noise)
-			Frame        = {"Visible","BackgroundTransparency"},
-			ImageLabel   = {"Visible","Image"},
-			ImageButton  = {"Visible","Image"},
-			TextLabel    = {"Text","Visible"},
-			TextButton   = {"Text","Visible"},
-			TextBox      = {"Text","PlaceholderText"},
-			-- Constraints (we let through but keep lite)
-			Seat         = {"Disabled"},
-			VehicleSeat  = {"Disabled","MaxSpeed"},
+			TrussPart     = {"Position","Size","Color","Transparency","Anchored"},
+			Humanoid      = {"Health","MaxHealth","WalkSpeed","JumpPower","DisplayName","RigType"},
+			Frame         = {"Visible","BackgroundTransparency"},
+			ImageLabel    = {"Visible","Image"},
+			ImageButton   = {"Visible","Image"},
+			TextLabel     = {"Text","Visible"},
+			TextButton    = {"Text","Visible","Disabled"},
+			TextBox       = {"Text","PlaceholderText"},
+			Seat          = {"Disabled"},
+			VehicleSeat   = {"Disabled","MaxSpeed"},
 		}
 
-		-- Classes that always get the FULL API property dump (they matter)
-		local FULL_DUMP_CLASS = {
+		-- Classes that always get the FULL property dump
+		local FULL_DUMP = {
 			RemoteEvent=true, RemoteFunction=true,
 			BindableEvent=true, BindableFunction=true,
 			ProximityPrompt=true, ClickDetector=true,
 			Script=true, LocalScript=true, ModuleScript=true,
 			Sound=true, SoundGroup=true,
-			Humanoid=false, -- overridden by LITE_PROPS
 			SpawnLocation=true,
-			Tool=true, BackpackItem=true,
+			Tool=true,
 			NumberValue=true, StringValue=true, BoolValue=true,
 			IntValue=true, ObjectValue=true, Vector3Value=true, Color3Value=true,
+			CFrameValue=true, RayValue=true,
 			ScreenGui=true, SurfaceGui=true, BillboardGui=true,
 			Model=true,
+			Configuration=true,
+			Folder=true,
 		}
 
-		-- Important props to never filter out regardless of zero-value rule
+		-- Props to never filter even if zero/empty
 		local ALWAYS_KEEP = {
-			Enabled=true, Position=true, Size=true, Text=true,
-			ActionText=true, ObjectText=true, Value=true, Health=true,
-			HoldDuration=true, MaxActivationDistance=true, SoundId=true,
-			WalkSpeed=true, JumpPower=true, Disabled=true, Name=true,
-			DisplayName=true,
+			Enabled=true,Position=true,Size=true,Text=true,
+			ActionText=true,ObjectText=true,Value=true,Health=true,
+			HoldDuration=true,MaxActivationDistance=true,SoundId=true,
+			WalkSpeed=true,JumpPower=true,Disabled=true,Name=true,
+			DisplayName=true,Image=true,Volume=true,Looped=true,
 		}
 
-		-- Only dump these services (client-visible only)
-		local SERVICES = {
-			"ReplicatedStorage",  -- remotes, modules, NPC data
-			"Workspace",          -- interactables, game objects
-			"Players",            -- player scripts (not starter duplicates)
-			-- StarterGui/StarterPlayer skipped: exact duplicates of PlayerGui/PlayerScripts
-			-- SoundService/Lighting/Teams skipped: no useful remotes or scripts
-		}
-
-		-- -- Value serializer --------------------------------------------
+		-- Value serializer
 		local function sv(val)
 			local t=typeof(val)
 			if t=="string" then
@@ -11891,62 +10854,55 @@ Main = (function()
 			else return "["..t.."]" end
 		end
 
-		-- -- Output buffer (chunked flush to avoid memory crash on mobile) --
-		local buf={}
-		local bufSize=0
-		local FLUSH_EVERY=150  -- flush to file every N lines (lower = safer on mobile)
-		local txtFileReady=false
+		-- Chunked output buffer
+		local buf={}; local bufLines=0
+		local FLUSH_EVERY=120
+		local firstWrite=true
 		local function flushBuf()
 			if #buf==0 then return end
 			local chunk=table.concat(buf,"\n").."\n"
-			buf={}; bufSize=0
-			if not txtFileReady then
-				pcall(env.writefile, txtFile, chunk)
-				txtFileReady=true
+			buf={}; bufLines=0
+			if firstWrite then
+				pcall(env.writefile, txtFile, chunk); firstWrite=false
 			else
 				pcall(env.appendfile, txtFile, chunk)
 			end
 		end
 		local function w(s)
 			buf[#buf+1]=(s or "")
-			bufSize=bufSize+1
-			if bufSize>=FLUSH_EVERY then flushBuf() end
+			bufLines=bufLines+1
+			if bufLines>=FLUSH_EVERY then flushBuf() end
 		end
-		local function sep()  w(("-"):rep(60)) end
+		local function sep() w(("-"):rep(60)) end
 		local function hdr(t) w(("="):rep(60)); w("  "..t); w(("="):rep(60)) end
 
-		-- -- Summaries ---------------------------------------------------
-		local remotes={}; local scripts={}
+		-- Summary accumulators
+		local remotes={}; local scripts={}; local sounds={}
 
-		-- -- API prop cache: class -> filtered prop list ------------------
-		-- Computed once per class, reused for every instance of that class
+		-- API property cache
 		local propCache={}
 		local function getProps(cn)
 			if propCache[cn]~=nil then return propCache[cn] end
 			if not API or not API.GetMember then propCache[cn]=false; return false end
 			local raw=API.GetMember(cn,"Properties")
 			if not raw then propCache[cn]=false; return false end
-			-- Filter out noise at cache-build time
 			local filtered={}
 			for _,prop in ipairs(raw) do
-				if not prop.Tags.WriteOnly
-				and not prop.Tags.Hidden
-				and not prop.Tags.Deprecated then
+				if not prop.Tags.WriteOnly and not prop.Tags.Hidden and not prop.Tags.Deprecated then
 					filtered[#filtered+1]=prop.Name
 				end
 			end
-			propCache[cn]=filtered
-			return filtered
+			propCache[cn]=filtered; return filtered
 		end
 
-		-- -- Script save -------------------------------------------------
+		-- Script saver
 		local function saveScript(inst)
 			local src=""
 			pcall(function() src=inst.Source end)
 			if (src=="" or not src) and Settings.Dump.DecompileScripts and env.decompile then
 				local ok,dec=pcall(env.decompile,inst)
 				if ok and dec and dec~="" then src=dec end
-				task.wait() -- yield after each decompile (heavy op on mobile)
+				task.wait() -- yield after decompile (expensive)
 			end
 			if not src or src=="" then return nil,0 end
 			local fn=inst:GetFullName():gsub("[%./%\\%s]","_")..".lua"
@@ -11955,8 +10911,9 @@ Main = (function()
 			return fp,#src
 		end
 
-		-- -- Attribute dump ----------------------------------------------
+		-- Attribute dump
 		local function dumpAttrs(inst,pad)
+			if not Settings.Dump.DumpAttributes then return end
 			local ok,attrs=pcall(function() return inst:GetAttributes() end)
 			if not ok or not attrs then return end
 			for k,v in pairs(attrs) do
@@ -11964,9 +10921,18 @@ Main = (function()
 			end
 		end
 
-		-- -- Property dump -----------------------------------------------
+		-- Tag dump
+		local cs_ok, cs = pcall(function() return game:GetService("CollectionService") end)
+		local function dumpTags(inst, pad)
+			if not Settings.Dump.DumpTags or not cs_ok then return end
+			local ok,tags=pcall(function() return cs:GetTags(inst) end)
+			if ok and #tags>0 then
+				w(pad.."  [Tags] "..table.concat(tags,", "))
+			end
+		end
+
+		-- Property dump
 		local function dumpProps(inst,pad,cn)
-			-- Lite-mode: only dump the short list for noisy classes
 			local lite=LITE_PROPS[cn]
 			if lite then
 				for _,pn in ipairs(lite) do
@@ -11975,11 +10941,7 @@ Main = (function()
 				end
 				return
 			end
-
-			-- Skip full dump for boring classes we haven't whitelisted
-			if not FULL_DUMP_CLASS[cn] then return end
-
-			-- Full API dump (cached)
+			if not FULL_DUMP[cn] then return end
 			local props=getProps(cn)
 			if not props then return end
 			for _,pn in ipairs(props) do
@@ -11987,72 +10949,50 @@ Main = (function()
 				if ok and v~=nil then
 					local skip=false
 					if not ALWAYS_KEEP[pn] then
-						if typeof(v)=="boolean" and v==false then skip=true end
-						if typeof(v)=="number"  and v==0     then skip=true end
-						if typeof(v)=="string"  and v==""    then skip=true end
+						local tv=typeof(v)
+						if tv=="boolean" and v==false then skip=true end
+						if tv=="number"  and v==0     then skip=true end
+						if tv=="string"  and v==""    then skip=true end
 					end
 					if not skip then w(pad.."  "..pn.."="..sv(v)) end
 				end
 			end
 		end
 
-		-- -- Instance walker (iterative, not recursive, so no stack overflow) --
-		-- Uses explicit stack to avoid Lua call-stack blowout on deep trees
-		local yieldTimer=tick()
+		-- Iterative tree walker (no stack overflow)
 		local function walk(root)
-			-- stack entries: {inst, depth}
 			local stack={{root,1}}
-			local si=#stack
+			local si=1
 			while si>0 do
-				local entry=stack[si]; stack[si]=nil; si-=1
+				local entry=stack[si]; stack[si]=nil; si=si-1
 				local inst,depth=entry[1],entry[2]
 
-				-- Yield check -- prevents freeze every YIELD_EVERY instances
-				instCount = 				instCount + 1
+				instCount=instCount+1
 				if instCount%YIELD_EVERY==0 then
 					task.wait()
-					-- Print progress every 500
-					if instCount%500==0 then
-						print(("[Dex Dump] "..instCount.." instances processed..."))
+					if instCount%1000==0 then
+						print(("[Dex Dump] %d instances..."):format(instCount))
 					end
 				end
 
-				-- Hard limit
-				if instCount>INST_LIMIT then
-					if not limitHit then
-						limitHit=true
-						w("  !! LIMIT "..INST_LIMIT.." instances reached -- stopping tree walk")
-						print("[Dex Dump] Instance limit hit ("..INST_LIMIT..") -- stopping")
-					end
-					break
-				end
-
-				-- Class check
-				local ok1,cn=pcall(function() return inst.ClassName end)
-				local ok2,nm=pcall(function() return inst.Name end)
-				local ok3,par=pcall(function() return inst.Parent end)
-				-- Skip character model subtrees under Players (just keep Scripts/Guis)
-				local isCharPart = ok3 and par and (cn=="Part" or cn=="MeshPart" or cn=="UnionOperation"
-					or cn=="Motor6D" or cn=="Attachment" or cn=="WeldConstraint")
-					and par.ClassName~="Model" and depth>3
-				local skipInst = (not ok1) or SKIP_CLASS[cn] or (not ok2) or SKIP_SUBTREE_NAME[nm]
-					or (ok3 and par and SKIP_IF_PARENT_CLASS[par.ClassName])
-				if not skipInst then
+				local ok1,cn = pcall(function() return inst.ClassName end)
+				local ok2,nm = pcall(function() return inst.Name end)
+				if not ok1 or not ok2 then goto continue end
+				if SKIP_CLASS[cn] or SKIP_NAME[nm] then goto continue end
 
 				local pad=("  "):rep(depth)
-				local full=""; pcall(function() full=inst:GetFullName() end)
-
-				-- Header (only print PATH for non-shallow nodes)
 				w(pad.."["..cn.."] "..nm)
 
-				-- Collect remotes
-				if cn=="RemoteEvent" or cn=="BindableEvent"
-				or cn=="RemoteFunction" or cn=="BindableFunction" then
+				-- Remote
+				if cn=="RemoteEvent" or cn=="RemoteFunction"
+				or cn=="BindableEvent" or cn=="BindableFunction" then
+					local full=""; pcall(function() full=inst:GetFullName() end)
 					remotes[#remotes+1]="["..cn.."] "..full
 				end
 
-				-- Scripts
+				-- Script
 				if cn=="Script" or cn=="LocalScript" or cn=="ModuleScript" then
+					local full=""; pcall(function() full=inst:GetFullName() end)
 					local dis=false; pcall(function() dis=inst.Disabled end)
 					w(pad.."  Disabled="..tostring(dis))
 					if Settings.Dump.SaveScripts then
@@ -12066,145 +11006,245 @@ Main = (function()
 					end
 				end
 
-				-- Properties
+				-- Sound
+				if cn=="Sound" and Settings.Dump.DumpSounds then
+					local full=""; pcall(function() full=inst:GetFullName() end)
+					local sid=""; pcall(function() sid=inst.SoundId end)
+					local vol=1;  pcall(function() vol=inst.Volume end)
+					sounds[#sounds+1]="["..cn.."] "..full.." id="..sid.." vol="..tostring(vol)
+				end
+
 				dumpProps(inst,pad,cn)
-
-				-- Attributes (only dump if any exist -- fast check)
 				dumpAttrs(inst,pad)
+				dumpTags(inst,pad)
 
-				-- Push children -- skip descending into pure geometry parts
-				local skipChildren = (cn=="Part" or cn=="MeshPart" or cn=="UnionOperation"
-					or cn=="CornerWedgePart" or cn=="WedgePart" or cn=="TrussPart")
-					and depth > 4
+				-- Push children
+				local skipChildren = depth >= MAX_DEPTH
 				local cok,children=pcall(function() return inst:GetChildren() end)
-				if cok and children and depth<20 and not skipChildren then
+				if cok and children and not skipChildren then
 					for i=#children,1,-1 do
-						si = si + 1; stack[si]={children[i],depth+1}
+						si=si+1; stack[si]={children[i],depth+1}
 					end
 				end
 
-				-- Blank line between top-level service children
 				if depth==1 then w("") end
-
-				end -- skipInst check
+				::continue::
 			end
 		end
 
-		-- -- Build -------------------------------------------------------
-		hdr("DEX DUMP")
+		-- ---- Begin dump ----
+		hdr("DEX DUMP v2")
 		w("  PlaceId : "..tostring(game.PlaceId))
 		w("  JobId   : "..tostring(game.JobId))
 		w("  Tick    : "..TS)
 		w("  Executor: "..tostring(Main.Executor or "unknown"))
+		w("  Player  : "..tostring(plr.Name).." (UserId="..tostring(plr.UserId)..")")
 		w(("="):rep(60)); w("")
 
-		-- ReplicatedStorage: walk everything (remotes + modules live here)
-		local ok,RS2=pcall(function() return game:GetService("ReplicatedStorage") end)
-		if ok and RS2 then
-			w("[SERVICE] ReplicatedStorage")
-			walk(RS2)
-			task.wait()
-		end
+		-- Services to dump (in priority order)
+		local SERVICE_LIST = {
+			-- Highest value: remotes + module logic
+			{name="ReplicatedStorage",   mode="full"},
+			{name="ReplicatedFirst",      mode="full"},
+			-- Workspace: all children (not just known folders)
+			{name="Workspace",            mode="workspace"},
+			-- Player scripts + GUI (game-specific code)
+			{name="Players",              mode="players"},
+			-- Starter content (often identical to player content but good to have)
+			{name="StarterGui",           mode="full"},
+			{name="StarterPlayer",        mode="full"},
+			-- Teams/SoundService/Lighting: brief
+			{name="Teams",                mode="full"},
+			{name="SoundService",         mode="full"},
+			{name="Lighting",             mode="full"},
+		}
 
-		-- Workspace: ONLY walk named important folders, skip giant build geometry
-		local ok2,WS=pcall(function() return game:GetService("Workspace") end)
-		if ok2 and WS then
-			w("[SERVICE] Workspace (targeted)")
-			w("  [A] XRayCharge="..(pcall(function() return WS:GetAttribute("XRayCharge") end) and WS:GetAttribute("XRayCharge") or "?"))
-			local WS_TARGETS = {
-				"Interactables","NPCs","Mops","Events","Entities",
-				"DeveloperProducts","Lights","PSXReplicated",
-			}
-			-- Also dump workspace attributes
-			dumpAttrs(WS,"")
-			for _,fname in ipairs(WS_TARGETS) do
-				local f=WS:FindFirstChild(fname)
-				if f then
-					w("  [Folder] "..fname)
-					walk(f)
-					task.wait()
+		for _,svc in ipairs(SERVICE_LIST) do
+			local ok,sv_inst = pcall(function() return game:GetService(svc.name) end)
+			if not ok or not sv_inst then continue end
+
+			w("[SERVICE] "..svc.name)
+			dumpAttrs(sv_inst,"")
+
+			if svc.mode=="workspace" then
+				-- Walk ALL workspace children (not just known folder names)
+				local cok,wch = pcall(function() return sv_inst:GetChildren() end)
+				if cok then
+					-- Skip character models (just look for scripts inside)
+					local SKIP_WS_NAMES = {
+						HumanoidRootPart=true, Head=true, UpperTorso=true, LowerTorso=true,
+					}
+					for _,child in ipairs(wch) do
+						local ok2,cname = pcall(function() return child.Name end)
+						local ok3,ccn   = pcall(function() return child.ClassName end)
+						if not ok2 or not ok3 then continue end
+						-- Character models: only extract scripts
+						if ccn=="Model" then
+							local isChar = false
+							pcall(function()
+								local hum = child:FindFirstChildOfClass("Humanoid")
+								if hum then isChar=true end
+							end)
+							if isChar then
+								-- Only harvest scripts from character
+								for _,v in ipairs(child:GetDescendants()) do
+									local ok4,cn4=pcall(function() return v.ClassName end)
+									if ok4 and (cn4=="LocalScript" or cn4=="Script" or cn4=="ModuleScript") then
+										local full4=""; pcall(function() full4=v:GetFullName() end)
+										w("  [CharScript] "..full4)
+										if Settings.Dump.SaveScripts then
+											local fp,chars=saveScript(v)
+											if fp then w("    [src:"..fp.." "..chars.."c]") end
+										end
+									end
+								end
+							else
+								walk(child)
+								task.wait()
+							end
+						else
+							walk(child)
+							task.wait()
+						end
+					end
 				end
-			end
-			-- Walk any player characters in workspace for scripts only
-			for _,ch in ipairs(WS:GetChildren()) do
-				local ok3,cn3=pcall(function() return ch.ClassName end)
-				if ok3 and cn3=="Model" then
-					-- Only descend into character models for their scripts/guis
-					for _,v in ipairs(ch:GetDescendants()) do
-						local ok4,cn4=pcall(function() return v.ClassName end)
-						if ok4 and (cn4=="LocalScript" or cn4=="Script" or cn4=="ModuleScript") then
-							local full4=""; pcall(function() full4=v:GetFullName() end)
-							w("  [CharScript] "..full4)
-							if Settings.Dump.SaveScripts then
-								local fp,chars=saveScript(v)
-								if fp then w("    [src:"..fp.." "..chars.."c]") end
+
+			elseif svc.mode=="players" then
+				local lp = sv_inst.LocalPlayer
+				if lp then
+					w("  [LocalPlayer] "..lp.Name.." uid="..tostring(lp.UserId))
+					dumpAttrs(lp,"  ")
+
+					-- PlayerGui: skip topbar/framework noise
+					local SKIP_GUI = {
+						TopbarStandard=true, TopbarStandardClipped=true,
+						TopbarPlusGui=true, TopbarPlusReference=true,
+						ProximityPrompts=true, RobloxGui=true,
+					}
+					local pg=lp:FindFirstChild("PlayerGui")
+					if pg then
+						for _,child in ipairs(pg:GetChildren()) do
+							local cnok,cname=pcall(function() return child.Name end)
+							if cnok and not SKIP_GUI[cname] then
+								walk(child); task.wait()
 							end
 						end
 					end
+
+					-- PlayerScripts: skip Roblox internals
+					local SKIP_PS = {
+						PlayerModule=true, RbxCharacterSounds=true, AtomicBinding=true,
+					}
+					local ps=lp:FindFirstChild("PlayerScripts")
+					if ps then
+						for _,child in ipairs(ps:GetChildren()) do
+							local cnok,cname=pcall(function() return child.Name end)
+							if cnok and not SKIP_PS[cname] then
+								walk(child); task.wait()
+							end
+						end
+					end
+
+					-- Backpack (tools)
+					local bp=lp:FindFirstChild("Backpack")
+					if bp then walk(bp); task.wait() end
+				end
+
+			else -- mode=="full"
+				local cok2,children = pcall(function() return sv_inst:GetChildren() end)
+				if cok2 then
+					local SKIP_SVC_NAMES = {
+						PlayerModule=true, RbxCharacterSounds=true,
+						AtomicBinding=true,
+					}
+					for _,child in ipairs(children) do
+						local cnok,cname=pcall(function() return child.Name end)
+						if cnok and not SKIP_SVC_NAMES[cname] then
+							walk(child); task.wait()
+						end
+					end
 				end
 			end
+
+			w("")
 			task.wait()
 		end
 
-		-- Players: LocalPlayer only, surgically skip Roblox internals
-		local ok3,PLRS=pcall(function() return game:GetService("Players") end)
-		if ok3 and PLRS then
-			local lp=PLRS.LocalPlayer
-			if lp then
-				w("[SERVICE] Players (LocalPlayer only)")
-				dumpAttrs(lp,"  ")
-
-				-- PlayerGui: walk each child individually, skip topbar/UI framework noise
-				local SKIP_GUI = {
-					TopbarStandard=true, TopbarStandardClipped=true,
-					TopbarPlusGui=true, TopbarPlusReference=true,
-					ProximityPrompts=true,
+		-- ---- Lighting detailed dump ----
+		if Settings.Dump.DumpLighting then
+			local lok,lt = pcall(function() return game:GetService("Lighting") end)
+			if lok and lt then
+				hdr("LIGHTING")
+				local lightingProps = {
+					"Brightness","ClockTime","FogColor","FogEnd","FogStart",
+					"GeographicLatitude","OutdoorAmbient","ShadowColor",
+					"TimeOfDay","Ambient","GlobalShadows","EnvironmentSpecularScale",
+					"EnvironmentDiffuseScale","ExposureCompensation",
 				}
-				local pg=lp:FindFirstChild("PlayerGui")
-				if pg then
-					for _,child in ipairs(pg:GetChildren()) do
-						local cnok,cname=pcall(function() return child.Name end)
-						if cnok and not SKIP_GUI[cname] then
-							walk(child); task.wait()
-						end
+				for _,p in ipairs(lightingProps) do
+					local ok2,v=pcall(function() return lt[p] end)
+					if ok2 then w("  "..p.."="..sv(v)) end
+				end
+				-- Atmosphere
+				local atm = lt:FindFirstChildOfClass("Atmosphere")
+				if atm then
+					w("  [Atmosphere]")
+					for _,p in ipairs({"Density","Offset","Color","Decay","Glare","Haze"}) do
+						local ok3,v=pcall(function() return atm[p] end)
+						if ok3 then w("    "..p.."="..sv(v)) end
 					end
 				end
-
-				-- PlayerScripts: skip PlayerModule (Roblox internals) and RbxCharacterSounds
-				local SKIP_PS = {
-					PlayerModule=true, RbxCharacterSounds=true,
-					AtomicBinding=true,
-				}
-				local ps=lp:FindFirstChild("PlayerScripts")
-				if ps then
-					for _,child in ipairs(ps:GetChildren()) do
-						local cnok,cname=pcall(function() return child.Name end)
-						if cnok and not SKIP_PS[cname] then
-							walk(child); task.wait()
-						end
+				-- Sky/ColorCorrection/BloomEffect
+				for _,child in ipairs(lt:GetChildren()) do
+					local ok4,ccn=pcall(function() return child.ClassName end)
+					if ok4 then
+						w("  ["..ccn.."] "..child.Name)
 					end
 				end
-
-				-- Backpack: walk fully (tools live here)
-				local bp=lp:FindFirstChild("Backpack")
-				if bp then walk(bp); task.wait() end
+				w("")
 			end
 		end
 
-		-- Nil instances (only if under limit)
-		if not limitHit and Settings.Dump.ScanNilInstances and env.getnilinstances then
+		-- ---- Teams ----
+		if Settings.Dump.DumpTeams then
+			local tok,ts = pcall(function() return game:GetService("Teams") end)
+			if tok and ts then
+				local tc_ok,tchildren=pcall(function() return ts:GetChildren() end)
+				if tc_ok and #tchildren>0 then
+					hdr("TEAMS ("..#tchildren..")")
+					for _,team in ipairs(tchildren) do
+						local tc="?"; local score="?"
+						pcall(function() tc=tostring(team.TeamColor) end)
+						pcall(function() score=tostring(team.Score) end)
+						local members={}
+						pcall(function()
+							for _,p in ipairs(game:GetService("Players"):GetPlayers()) do
+								if p.Team==team then members[#members+1]=p.Name end
+							end
+						end)
+						w(("  [Team] %s | color=%s | score=%s | members=[%s]"):format(
+							team.Name, tc, score, table.concat(members,",")))
+					end
+					w("")
+				end
+			end
+		end
+
+		-- ---- Nil instances ----
+		if Settings.Dump.ScanNilInstances and env.getnilinstances then
 			local ok,nils=pcall(env.getnilinstances)
 			if ok and nils and #nils>0 then
 				hdr("NIL INSTANCES ("..#nils..")")
-				for _,inst in ipairs(nils) do
-					if limitHit then break end
+				for i,inst in ipairs(nils) do
+					if i>100 then w("  ... (capped at 100)"); break end
 					walk(inst)
 				end
+				w("")
 			end
 		end
 
-		-- GC hidden instances (simple list only -- no walking subtrees to avoid explosion)
-		if not limitHit and Settings.Dump.ScanGC and env.getgc then
+		-- ---- GC hidden instances ----
+		if Settings.Dump.ScanGC and env.getgc then
 			local ok,gc=pcall(env.getgc,true)
 			if ok and gc then
 				local hidden={}
@@ -12213,23 +11253,64 @@ Main = (function()
 						local pok,par=pcall(function() return v.Parent end)
 						if pok and par==nil then
 							hidden[#hidden+1]=v
-							if #hidden>=200 then break end -- cap GC scan
+							if #hidden>=300 then break end
 						end
 					end
 				end
 				if #hidden>0 then
 					hdr("GC NIL-PARENT INSTANCES ("..#hidden..")")
+					local typeCounts={}
 					for _,inst in ipairs(hidden) do
 						local ok2,cn=pcall(function() return inst.ClassName end)
 						local ok3,nm=pcall(function() return inst.Name end)
-						w("  ["..(ok2 and cn or "?").."] "..(ok3 and nm or "?"))
+						local cn2=(ok2 and cn or "?")
+						local nm2=(ok3 and nm or "?")
+						typeCounts[cn2]=(typeCounts[cn2] or 0)+1
+						w("  ["..cn2.."] "..nm2)
+					end
+					-- Class summary
+					w("  -- Class breakdown --")
+					local sorted={}
+					for cn,n in pairs(typeCounts) do sorted[#sorted+1]={cn,n} end
+					table.sort(sorted,function(a,b) return a[2]>b[2] end)
+					for _,pair in ipairs(sorted) do
+						w("    "..pair[1]..": "..pair[2])
 					end
 					w("")
 				end
 			end
 		end
 
-		-- Loaded modules (just paths, no walking)
+		-- ---- GC scripts (hidden local scripts) ----
+		if Settings.Dump.ScanGC and env.getgc and Settings.Dump.SaveScripts then
+			local ok,gc=pcall(env.getgc,true)
+			if ok and gc then
+				local gcscripts={}
+				for _,v in ipairs(gc) do
+					if typeof(v)=="Instance" then
+						local ok2,cn=pcall(function() return v.ClassName end)
+						if ok2 and (cn=="LocalScript" or cn=="Script" or cn=="ModuleScript") then
+							local pok,par=pcall(function() return v.Parent end)
+							if pok and par==nil then
+								gcscripts[#gcscripts+1]=v
+							end
+						end
+					end
+				end
+				if #gcscripts>0 then
+					hdr("GC HIDDEN SCRIPTS ("..#gcscripts..")")
+					for _,inst in ipairs(gcscripts) do
+						local ok3,full=pcall(function() return inst:GetFullName() end)
+						w("  ["..inst.ClassName.."] "..(ok3 and full or inst.Name))
+						local fp,chars=saveScript(inst)
+						if fp then w("    [src:"..fp.." "..chars.."c]") end
+					end
+					w("")
+				end
+			end
+		end
+
+		-- ---- Loaded modules ----
 		if Settings.Dump.ScanLoadedModules and env.getloadedmodules then
 			local ok,mods=pcall(env.getloadedmodules)
 			if ok and mods and #mods>0 then
@@ -12242,7 +11323,37 @@ Main = (function()
 			end
 		end
 
-		-- Remote summary (sorted -- most useful section for scripting)
+		-- ---- CollectionService tags summary ----
+		if Settings.Dump.DumpTags and cs_ok and cs then
+			local allTagged={}
+			pcall(function()
+				for _,inst in ipairs(game:GetDescendants()) do
+					local tok,tags=pcall(function() return cs:GetTags(inst) end)
+					if tok and #tags>0 then
+						local fn=""; pcall(function() fn=inst:GetFullName() end)
+						for _,tag in ipairs(tags) do
+							if not allTagged[tag] then allTagged[tag]={} end
+							if #allTagged[tag]<30 then
+								allTagged[tag][#allTagged[tag]+1]=fn
+							end
+						end
+					end
+				end
+			end)
+			local sortedTags={}
+			for t in pairs(allTagged) do sortedTags[#sortedTags+1]=t end
+			table.sort(sortedTags)
+			if #sortedTags>0 then
+				hdr("COLLECTION SERVICE TAGS ("..#sortedTags..")")
+				for _,tag in ipairs(sortedTags) do
+					w("  [Tag] "..tag.." ("..#allTagged[tag]..")")
+					for _,fn in ipairs(allTagged[tag]) do w("    "..fn) end
+				end
+				w("")
+			end
+		end
+
+		-- ---- Remote summary ----
 		if #remotes>0 then
 			hdr("REMOTE SUMMARY ("..#remotes..")")
 			table.sort(remotes)
@@ -12250,14 +11361,40 @@ Main = (function()
 			w("")
 		end
 
-		-- Script summary
+		-- ---- Sound summary ----
+		if #sounds>0 then
+			hdr("SOUND SUMMARY ("..#sounds..")")
+			for _,s in ipairs(sounds) do w("  "..s) end
+			w("")
+		end
+
+		-- ---- Script summary ----
 		if #scripts>0 then
 			hdr("SAVED SCRIPTS ("..#scripts..")")
 			for _,s in ipairs(scripts) do w("  "..s) end
 			w("")
 		end
 
-		-- Workspace attributes
+		-- ---- Player attributes ----
+		local pok2,pa=pcall(function() return plr:GetAttributes() end)
+		if pok2 and pa and next(pa) then
+			hdr("LOCAL PLAYER ATTRIBUTES")
+			for k,v in pairs(pa) do w("  "..tostring(k).."="..sv(v)) end
+			w("")
+		end
+
+		-- ---- Character attributes ----
+		local char=plr.Character
+		if char then
+			local ca_ok,ca=pcall(function() return char:GetAttributes() end)
+			if ca_ok and ca and next(ca) then
+				hdr("CHARACTER ATTRIBUTES")
+				for k,v in pairs(ca) do w("  "..tostring(k).."="..sv(v)) end
+				w("")
+			end
+		end
+
+		-- ---- Workspace attributes ----
 		local wok,wa=pcall(function() return workspace:GetAttributes() end)
 		if wok and wa and next(wa) then
 			hdr("WORKSPACE ATTRIBUTES")
@@ -12265,45 +11402,25 @@ Main = (function()
 			w("")
 		end
 
-		-- Player attributes
-		local pok,pa=pcall(function() return plr:GetAttributes() end)
-		if pok and pa and next(pa) then
-			hdr("LOCAL PLAYER ATTRIBUTES")
-			for k,v in pairs(pa) do w("  "..tostring(k).."="..sv(v)) end
-			w("")
-		end
-
-		-- Character attributes
-		local char=plr.Character
-		if char then
-			local cok2,ca=pcall(function() return char:GetAttributes() end)
-			if cok2 and ca and next(ca) then
-				hdr("CHARACTER ATTRIBUTES")
-				for k,v in pairs(ca) do w("  "..tostring(k).."="..sv(v)) end
-				w("")
-			end
-		end
-
 		w(("="):rep(60))
-		w(("  DONE | instances:%d | lines:%d | remotes:%d | scripts:%d"):format(
-			instCount,bufSize+#buf,#remotes,#scripts))
+		w(("  DONE | inst:%d | remotes:%d | scripts:%d | sounds:%d"):format(
+			instCount,#remotes,#scripts,#sounds))
 		w(("="):rep(60))
 
-		task.wait() -- final yield before write
-		flushBuf() -- flush remaining lines
+		task.wait()
+		flushBuf()
 
-		print(("[Dex Dump] ? %d instances | %d lines | %d remotes | %d scripts"):format(
-			instCount,#buf,#remotes,#scripts))
-		print("[Dex Dump] -> "..txtFile)
+		print(("[Dex Dump v2] ✓ Done | %d inst | %d remotes | %d scripts | %d sounds"):format(
+			instCount,#remotes,#scripts,#sounds))
+		print("[Dex Dump v2] -> "..txtFile)
 	end
 
-	-- -- Click-to-Select ------------------------------------------------
+	-- ---- Click-to-Select -----------------------------------------------
 	Main.InitClickToSelect = function()
 		if Main.ClickToSelectConn then Main.ClickToSelectConn:Disconnect() end
 		if not Settings.Explorer.ClickToSelect then return end
 		Main.ClickToSelectConn = service.UserInputService.InputBegan:Connect(function(input,gp)
 			if gp or input.UserInputType~=Enum.UserInputType.MouseButton1 then return end
-			-- bail if mouse is over any Dex gui
 			for _,gui in ipairs(Main.GuiHolder:GetChildren()) do
 				if gui:IsA("ScreenGui") and gui.Enabled then
 					if Lib and Lib.CheckMouseInGui and Lib.CheckMouseInGui(gui) then return end
@@ -12321,7 +11438,7 @@ Main = (function()
 		end)
 	end
 
-	-- -- Settings window -------------------------------------------------
+	-- ---- Settings GUI --------------------------------------------------
 	Main.OpenSettingsGui = function()
 		if Main.SettingsGui then
 			Main.SettingsGui.Enabled=not Main.SettingsGui.Enabled; return
@@ -12330,14 +11447,14 @@ Main = (function()
 		sg.Name="DexCfg"; sg.IgnoreGuiInset=true; sg.ResetOnSpawn=false
 		Main.ShowGui(sg); Main.SettingsGui=sg
 		local frame=createSimple("Frame",{
-			Size=UDim2.new(0,340,0,430),
-			Position=UDim2.new(.5,-170,.5,-215),
+			Size=UDim2.new(0,360,0,520),
+			Position=UDim2.new(.5,-180,.5,-260),
 			BackgroundColor3=Color3.fromRGB(38,38,38),
 			BorderSizePixel=0, Active=true, Draggable=true,
 			Parent=sg,
 		})
 		Instance.new("UICorner",frame).CornerRadius=UDim.new(0,8)
-		-- title bar
+
 		local tbar=createSimple("Frame",{
 			Size=UDim2.new(1,0,0,34),BackgroundColor3=Color3.fromRGB(24,24,24),
 			BorderSizePixel=0,Parent=frame,
@@ -12345,13 +11462,13 @@ Main = (function()
 		Instance.new("UICorner",tbar).CornerRadius=UDim.new(0,8)
 		createSimple("TextLabel",{
 			Size=UDim2.new(1,-40,1,0),BackgroundTransparency=1,
-			Text="?  Dex Settings",TextColor3=Color3.fromRGB(255,255,255),
+			Text="⚙  Dex Settings",TextColor3=Color3.fromRGB(255,255,255),
 			Font=Enum.Font.GothamBold,TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,
 			Position=UDim2.new(0,12,0,0),Parent=tbar,
 		})
 		local xbtn=createSimple("TextButton",{
 			Size=UDim2.new(0,26,0,26),Position=UDim2.new(1,-30,0,4),
-			BackgroundColor3=Color3.fromRGB(180,50,50),Text="?",
+			BackgroundColor3=Color3.fromRGB(180,50,50),Text="✕",
 			TextColor3=Color3.fromRGB(255,255,255),Font=Enum.Font.GothamBold,
 			TextSize=12,BorderSizePixel=0,Parent=tbar,
 		})
@@ -12370,7 +11487,7 @@ Main = (function()
 				Font=Enum.Font.GothamBold,TextSize=11,
 				TextXAlignment=Enum.TextXAlignment.Left,Parent=f,
 			})
-			y = 			y + 22
+			y=y+22
 		end
 
 		local function toggle(label,get,set)
@@ -12397,7 +11514,7 @@ Main = (function()
 			end
 			refresh()
 			btn.MouseButton1Click:Connect(function() set(not get()); refresh() end)
-			y = 			y + 30
+			y=y+30
 		end
 
 		section("Explorer")
@@ -12426,6 +11543,21 @@ Main = (function()
 		toggle("Decompile Scripts",
 			function() return Settings.Dump.DecompileScripts end,
 			function(v) Settings.Dump.DecompileScripts=v end)
+		toggle("Dump Attributes",
+			function() return Settings.Dump.DumpAttributes end,
+			function(v) Settings.Dump.DumpAttributes=v end)
+		toggle("Dump Tags (CollectionService)",
+			function() return Settings.Dump.DumpTags end,
+			function(v) Settings.Dump.DumpTags=v end)
+		toggle("Dump Sounds",
+			function() return Settings.Dump.DumpSounds end,
+			function(v) Settings.Dump.DumpSounds=v end)
+		toggle("Dump Lighting",
+			function() return Settings.Dump.DumpLighting end,
+			function(v) Settings.Dump.DumpLighting=v end)
+		toggle("Dump Teams",
+			function() return Settings.Dump.DumpTeams end,
+			function(v) Settings.Dump.DumpTeams=v end)
 		toggle("Scan GC (hidden instances)",
 			function() return Settings.Dump.ScanGC end,
 			function(v) Settings.Dump.ScanGC=v end)
@@ -12436,26 +11568,18 @@ Main = (function()
 			function() return Settings.Dump.ScanLoadedModules end,
 			function(v) Settings.Dump.ScanLoadedModules=v end)
 
-		section("Remote Spy")
-		toggle("Auto-start RemoteSpy",
-			function() return Settings.RemoteSpy and Settings.RemoteSpy.AutoStart or false end,
-			function(v)
-				if not Settings.RemoteSpy then Settings.RemoteSpy={} end
-				Settings.RemoteSpy.AutoStart=v
-			end)
-
-		y = 		y + 4
+		y=y+4
 		local savebtn=createSimple("TextButton",{
 			Size=UDim2.new(1,-16,0,30),Position=UDim2.new(0,8,0,y),
 			BackgroundColor3=Color3.fromRGB(50,120,210),BorderSizePixel=0,
-			Text="?  Save Settings",TextColor3=Color3.fromRGB(255,255,255),
+			Text="💾  Save Settings",TextColor3=Color3.fromRGB(255,255,255),
 			Font=Enum.Font.GothamBold,TextSize=13,Parent=frame,
 		})
 		Instance.new("UICorner",savebtn).CornerRadius=UDim.new(0,6)
 		savebtn.MouseButton1Click:Connect(function()
 			Main.SaveSettings()
-			savebtn.Text="? Saved!"
-			task.delay(1.5,function() savebtn.Text="?  Save Settings" end)
+			savebtn.Text="✓ Saved!"
+			task.delay(1.5,function() savebtn.Text="💾  Save Settings" end)
 		end)
 	end
 
@@ -12464,7 +11588,7 @@ Main = (function()
 			{1,"ScreenGui",{IgnoreGuiInset=true,Name="MainMenu"}},
 			{2,"TextButton",{AnchorPoint=Vector2.new(.5,0),AutoButtonColor=false,BackgroundColor3=Color3.new(.176,.176,.176),BorderSizePixel=0,Font=4,Name="OpenButton",Parent={1},Position=UDim2.new(.5,0,0,2),Size=UDim2.new(0,32,0,32),Text="Dex",TextColor3=Color3.new(1,1,1),TextSize=16,TextTransparency=.2}},
 			{3,"UICorner",{CornerRadius=UDim.new(0,4),Parent={2}}},
-			{4,"Frame",{AnchorPoint=Vector2.new(.5,0),BackgroundColor3=Color3.new(.176,.176,.176),ClipsDescendants=true,Name="MainFrame",Parent={2},Position=UDim2.new(.5,0,1,-4),Size=UDim2.new(0,224,0,280)}},
+			{4,"Frame",{AnchorPoint=Vector2.new(.5,0),BackgroundColor3=Color3.new(.176,.176,.176),ClipsDescendants=true,Name="MainFrame",Parent={2},Position=UDim2.new(.5,0,1,-4),Size=UDim2.new(0,224,0,300)}},
 			{5,"UICorner",{CornerRadius=UDim.new(0,4),Parent={4}}},
 			{6,"Frame",{BackgroundColor3=Color3.new(.204,.204,.204),Name="BottomFrame",Parent={4},Position=UDim2.new(0,0,1,-24),Size=UDim2.new(1,0,0,24)}},
 			{7,"UICorner",{CornerRadius=UDim.new(0,4),Parent={6}}},
@@ -12506,42 +11630,26 @@ Main = (function()
 			end
 		end)
 
-		-- -- Core apps ---------------------------------------------------
+		-- Core apps
 		Main.CreateApp({Name="Explorer",   IconMap=Main.LargeIcons,Icon="Explorer",   Open=true,Window=Explorer.Window})
 		Main.CreateApp({Name="Properties", IconMap=Main.LargeIcons,Icon="Properties", Open=true,Window=Properties.Window})
 		Main.CreateApp({Name="Script View",IconMap=Main.LargeIcons,Icon="Script_Viewer",Window=ScriptViewer.Window})
 
-		-- -- New apps ----------------------------------------------------
-		if RemoteSpy then
-			Main.CreateApp({
-				Name="Remote Spy",
-				IconMap=Main.MiscIcons, Icon="ExploreData",
-				Window=RemoteSpy.Window,
-				OnClick=function(open)
-					if open then
-						coroutine.wrap(function() RemoteSpy.Start() end)()
-					end
-				end,
-			})
-		end
-
-		if Terminal then
-			Main.CreateApp({Name="Terminal",IconMap=Main.MiscIcons,Icon="CallFunction",Window=Terminal.Window})
-		end
-
-		-- -- Dump (one-shot trigger) --------------------------------------
+		-- Dump (one-shot trigger, auto-disables after click)
 		Main.CreateApp({
 			Name="Dump",
 			IconMap=Main.MiscIcons, Icon="Save",
 			OnClick=function(open)
 				if open then
 					coroutine.wrap(function() Main.DumpGame() end)()
-					if Main.MenuApps["Dump"] then Main.MenuApps["Dump"].Disable(true) end
+					task.delay(0.5,function()
+						if Main.MenuApps["Dump"] then Main.MenuApps["Dump"].Disable(true) end
+					end)
 				end
 			end,
 		})
 
-		-- settings gear
+		-- Settings gear
 		gui.OpenButton.MainFrame.BottomFrame.Settings.MouseButton1Click:Connect(function()
 			Main.OpenSettingsGui()
 		end)
@@ -12621,12 +11729,7 @@ Main = (function()
 
 		Main.InitClickToSelect()
 
-		-- Auto-start remote spy if setting enabled
-		if Settings.RemoteSpy and Settings.RemoteSpy.AutoStart and RemoteSpy then
-			coroutine.wrap(function() RemoteSpy.Start() end)()
-		end
-
-		print("[Dex Enhanced "..Main.Version.."] Ready -- PlaceId:"..tostring(game.PlaceId))
+		print("[Dex Enhanced "..Main.Version.."] Ready | PlaceId:"..tostring(game.PlaceId))
 	end
 
 	return Main
