@@ -1,15 +1,9 @@
 local EmbeddedModules = {
 ["Lib"] = function()
---[[
-	Lib Module
-	
-	Container for functions and classes
-]]
 
--- Common Locals
-local Main,Lib,Apps,Settings -- Main Containers
-local Explorer, Properties, ScriptViewer, Notebook -- Major Apps
-local API,RMD,env,service,plr,create,createSimple -- Main Locals
+local Main,Lib,Apps,Settings 
+local Explorer, Properties, ScriptViewer, Notebook 
+local API,RMD,env,service,plr,create,createSimple 
 
 local function initDeps(data)
 	Main = data.Main
@@ -38,10 +32,10 @@ local function main()
 
 	local renderStepped = service.RunService.RenderStepped
 	local signalWait = renderStepped.wait
-	local PH = newproxy() -- Placeholder, must be replaced in constructor
+	local PH = newproxy() 
 	local SIGNAL = newproxy()
 
-	-- Usually for classes that work with a Roblox Object
+	
 	local function initObj(props,mt)
 		local type = type
 		local function copy(t)
@@ -67,7 +61,7 @@ local function main()
 		__newindex = function(self,ind,val) if not props[ind] then self.Gui[ind] = val else rawset(self,ind,val) end end}
 	end
 
-	-- Functions
+	
 
 	Lib.FormatLuaString = (function()
 		local string = string
@@ -161,12 +155,12 @@ local function main()
 
 	Lib.ParseXML = (function()
 		local func = function()
-			-- Only exists to parse RMD
-			-- from https://github.com/jonathanpoelen/xmlparser
+			
+			
 
 			local string, print, pairs = string, print, pairs
 
-			-- http://lua-users.org/wiki/StringTrim
+			
 			local trim = function(s)
 				local from = s:match"^%s*()"
 				return from > #s and "" or s:match(".*%S", from)
@@ -178,7 +172,7 @@ local function main()
 			local E = string.byte('E', 1)
 
 			function parse(s, evalEntities)
-				-- remove comments
+				
 				s = s:gsub('<!%-%-(.-)%-%->', '')
 
 				local entities, tentities = {}
@@ -204,7 +198,7 @@ local function main()
 				end
 
 				s:gsub('<([?!/]?)([-:_%w]+)%s*(/?>?)([^<]*)', function(type, name, closed, txt)
-					-- open
+					
 					if #type == 0 then
 						local a = {}
 						if #closed == 0 then
@@ -227,25 +221,25 @@ local function main()
 						end
 
 						addtext(txt)
-						-- close
+						
 					elseif '/' == type then
 						t = l[#l]
 						l[#l] = nil
 
 						addtext(txt)
-						-- ENTITY
+						
 					elseif '!' == type then
 						if E == name:byte(1) then
 							txt:gsub('([_%w]+)%s+(.)(.-)%2', function(name, q, entity)
 								entities[#entities+1] = {name=name, value=entity}
 							end, 1)
 						end
-						-- elseif '?' == type then
-						--   print('?  ' .. name .. ' // ' .. attrs .. '$$')
-						-- elseif '-' == type then
-						--   print('comment  ' .. name .. ' // ' .. attrs .. '$$')
-						-- else
-						--   print('o  ' .. #p .. ' // ' .. name .. ' // ' .. attrs .. '$$')
+						
+						
+						
+						
+						
+						
 					end
 				end)
 
@@ -458,7 +452,7 @@ local function main()
 		return Lib.LoadCustomAsset(filepath)
 	end
 
-	-- Classes
+	
 
 	Lib.Signal = (function()
 		local funcs = {}
@@ -780,8 +774,8 @@ local function main()
 			local thumbPress = false
 			local thumbFramePress = false
 
-			--local thumbColor = Color3.new(120/255,120/255,120/255)
-			--local thumbSelectColor = Color3.new(140/255,140/255,140/255)
+			
+			
 			button1.InputBegan:Connect(function(input)
 				if input.UserInputType == Enum.UserInputType.MouseMovement and not buttonPress and self:CanScrollUp() then button1.BackgroundTransparency = 0.8 end
 				local isClick1 = input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch
@@ -1148,8 +1142,8 @@ local function main()
 								self.SizeY = self.SizeY + (isV and deltaY*signY or 0)
 								guiMain.Size = UDim2.new(0,self.SizeX,0,self.Minimized and 20 or self.SizeY)
 
-								--if isH then self.SizeX = guiMain.AbsoluteSize.X end
-								--if isV then self.SizeY = guiMain.AbsoluteSize.Y end
+								
+								
 							end
 						end)
 					end
@@ -1396,16 +1390,10 @@ local function main()
 			leftSide.Frame.Resizer.Position = UDim2.new(0,leftSide.Width,0,0)
 			rightSide.Frame.Resizer.Position = UDim2.new(0,-5,0,0)
 
-			--leftSide.Frame.Visible = (#leftSide.Windows > 0)
-			--rightSide.Frame.Visible = (#rightSide.Windows > 0)
+			
+			
 
-			--[[if #leftSide.Windows > 0 and leftSide.Frame.Position == UDim2.new(0,-leftSide.Width-5,0,0) then
-				leftSide.Frame:TweenPosition(UDim2.new(0,0,0,0),Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.3,true)
-			elseif #leftSide.Windows == 0 and leftSide.Frame.Position == UDim2.new(0,0,0,0) then
-				leftSide.Frame:TweenPosition(UDim2.new(0,-leftSide.Width-5,0,0),Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.3,true)
-			end
-			local rightTweenPos = (#rightSide.Windows == 0 and UDim2.new(1,5,0,0) or UDim2.new(1,-rightSide.Width,0,0))
-			rightSide.Frame:TweenPosition(rightTweenPos,Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.3,true)]]
+			
 			local leftHidden = #leftSide.Windows == 0 or leftSide.Hidden
 			local rightHidden = #rightSide.Windows == 0 or rightSide.Hidden
 			local leftPos = (leftHidden and UDim2.new(0,-leftSide.Width-10,0,0) or UDim2.new(0,0,0,0))
@@ -1549,7 +1537,7 @@ local function main()
 			end)
 		end
 
-		local function renderSide(side,noTween) -- TODO: Use existing resizers
+		local function renderSide(side,noTween) 
 			local currentPos = 0
 			local sideFramePos = getSideFramePos(side)
 			local template = side.WindowResizer:Clone()
@@ -1564,7 +1552,7 @@ local function main()
 				local size = UDim2.new(0,side.Width,0,v.SizeY)
 				local pos = UDim2.new(sideFramePos.X.Scale,sideFramePos.X.Offset,0,currentPos)
 				Lib.ShowGui(v.Gui)
-				--v.GuiElems.Main:TweenSizeAndPosition(size,pos,Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.3,true)
+				
 				if noTween then
 					v.GuiElems.Main.Size = size
 					v.GuiElems.Main.Position = pos
@@ -1589,8 +1577,8 @@ local function main()
 				end
 			end
 
-			--side.Frame.Back.Position = UDim2.new(0,0,0,0)
-			--side.Frame.Back.Size = UDim2.new(0,side.Width,1,0)
+			
+			
 		end
 
 		local function updateSide(side,noTween)
@@ -1635,10 +1623,7 @@ local function main()
 				count = count + 1
 			end
 
-			--[[local leftTweenPos = (#leftSide.Windows == 0 and UDim2.new(0,-leftSide.Width-5,0,0) or UDim2.new(0,0,0,0))
-			leftSide.Frame:TweenPosition(leftTweenPos,Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.3,true)
-			local rightTweenPos = (#rightSide.Windows == 0 and UDim2.new(1,5,0,0) or UDim2.new(1,-rightSide.Width,0,0))
-			rightSide.Frame:TweenPosition(rightTweenPos,Enum.EasingDirection.Out,Enum.EasingStyle.Quad,0.3,true)]]
+			
 		end
 
 		funcs.SetMinimized = function(self,set,mode)
@@ -1877,13 +1862,13 @@ local function main()
 			if align then
 				window:AlignTo(targetSide,pos,size,data.Silent)
 			else
-				if align == nil and window.ClosedSide then -- Regular open
+				if align == nil and window.ClosedSide then 
 					window:AlignTo(window.ClosedSide,window.SidePos,size,true)
 					static.SetSideVisible(window.ClosedSide,true)
 				else
 					if table.find(visibleWindows,window) then return end
 
-					-- TODO: make better
+					
 					window.GuiElems.Main.Size = UDim2.new(0,window.SizeX,0,20)
 					local ti = TweenInfo.new(0.2,Enum.EasingStyle.Quad,Enum.EasingDirection.Out)
 					window:StopTweens()
@@ -2277,7 +2262,7 @@ local function main()
 		end
 
 		funcs.Show = function(self,x,y)
-			-- Initialize Gui
+			
 			local elems = self.GuiElems
 			elems.SearchFrame.Visible = self.SearchEnabled
 			elems.List.Position = UDim2.new(0,2,0,2 + (self.SearchEnabled and 24 or 0))
@@ -2286,15 +2271,15 @@ local function main()
 			self.GuiElems.List.CanvasPosition = Vector2.new(0,0)
 
 			if not self.Updated then
-				self:Refresh() -- Create entries
+				self:Refresh() 
 			end
 
-			-- Vars
+			
 			local reverseY = false
 			local x,y = x or mouse.X, y or mouse.Y
 			local maxX,maxY = mouse.ViewSizeX,mouse.ViewSizeY
 
-			-- Position and show
+			
 			if x + self.Width > maxX then
 				x = self.ReverseX and x - self.Width or maxX - self.Width
 			end
@@ -2303,8 +2288,8 @@ local function main()
 			self.Gui.DisplayOrder = Main.DisplayOrders.Menu
 			Lib.ShowGui(self.Gui)
 
-			-- Size adjustment
-			local toSize = elems.List.UIListLayout.AbsoluteContentSize.Y + 6 -- Padding
+			
+			local toSize = elems.List.UIListLayout.AbsoluteContentSize.Y + 6 
 			if self.MaxHeight and toSize > self.MaxHeight then
 				elems.List.CanvasSize = UDim2.new(0,0,0,toSize-6)
 				toSize = self.MaxHeight
@@ -2313,7 +2298,7 @@ local function main()
 			end
 			if y + toSize > maxY then reverseY = true end
 
-			-- Close event
+			
 			local closable
 			if self.CloseEvent then self.CloseEvent:Disconnect() end
 			self.CloseEvent = service.UserInputService.InputBegan:Connect(function(input)
@@ -2325,7 +2310,7 @@ local function main()
 				end
 			end)
 
-			-- Resize
+			
 			if reverseY then
 				elems.Main.Position = UDim2.new(0,x,0,y-(self.ReverseYOffset or 0))
 				local newY = y - toSize - (self.ReverseYOffset or 0)
@@ -2335,7 +2320,7 @@ local function main()
 				elems.Main:TweenSize(UDim2.new(0,self.Width,0,toSize),Enum.EasingDirection.Out,Enum.EasingStyle.Quart,0.2,true)
 			end
 
-			-- Close debounce
+			
 			Lib.FastWait()
 			if self.SearchEnabled and self.FocusSearchOnShow then elems.SearchBar:CaptureFocus() end
 			closable = true
@@ -2637,7 +2622,7 @@ local function main()
 							mouseEvent:Disconnect()
 							scrollEvent:Disconnect()
 							obj:SetCopyableSelection()
-							--updateSelection()
+							
 						end
 					end)
 
@@ -2961,7 +2946,7 @@ local function main()
 			local after = line:sub(cursorX+1)
 			
 			text = text:gsub("\r\n","\n")
-			text = self:ConvertText(text,true) -- Tab Convert
+			text = self:ConvertText(text,true) 
 			
 			local textLines = text:split("\n")
 			local insert = table.insert
@@ -2990,7 +2975,7 @@ local function main()
 			self.ScrollH:ScrollTo(self.ScrollH.Index + x)
 		end
 		
-		-- x and y starts at 0
+		
 		funcs.TabAdjust = function(self,x,y)
 			local lines = self.Lines
 			local line = lines[y+1]
@@ -3095,7 +3080,7 @@ local function main()
 			
 			cursorX = cursorX + self:TabAdjust(cursorX,cursorY)
 			
-			-- Update modified
+			
 			self.CursorX = cursorX
 			self.CursorY = cursorY
 			
@@ -3133,7 +3118,7 @@ local function main()
 		funcs.PreHighlight = function(self)
 			local start = tick()
 			local text = self.Text:gsub("\\\\","  ")
-			--print("BACKSLASH SUB",tick()-start)
+			
 			local textLen = #text
 			local found = {}
 			local foundMap = {}
@@ -3207,14 +3192,14 @@ local function main()
 
 				while pos > lineEnd do
 					curLine = curLine + 1
-					--lineTableCount = 1
+					
 					lineEnd = newLines[curLine] or textLen+1
 				end
 				while true do
 					local lineTable = foundHighlights[curLine]
 					if not lineTable then lineTable = {} foundHighlights[curLine] = lineTable end
 					lineTable[pos] = {typ,ending}
-					--lineTableCount = lineTableCount + 1
+					
 
 					if ending > lineEnd then
 						curLine = curLine + 1
@@ -3225,11 +3210,11 @@ local function main()
 				end
 
 				lastEnding = ending
-				--if i < 200 then print(curLine) end
+				
 			end
 			self.PreHighlights = foundHighlights
-			--print(tick()-start)
-			--print(#found,curLine)
+			
+			
 		end
 
 		funcs.HighlightLine = function(self,line)
@@ -3256,7 +3241,7 @@ local function main()
 				if relativePos < 1 then
 					currentType = data[1]
 					lastEnding = data[2] - lineStart
-					--warn(pos,data[2])
+					
 				else
 					preHighlightMap[relativePos] = {data[1],data[2]-lineStart}
 				end
@@ -3422,7 +3407,7 @@ local function main()
 				local curType = highlights[colStart]
 				local curTemplate = richTemplates[typeMap[curType]] or textTemplate
 				
-				-- Selection Highlight
+				
 				local selectionRange = self.SelectionRange
 				local selPos1 = selectionRange[1]
 				local selPos2 = selectionRange[2]
@@ -3442,7 +3427,7 @@ local function main()
 					lineFrame.SelectionHighlight.Visible = false
 				end
 				
-				-- Selection Text Color for first char
+				
 				local inSelection = selRelaY >= selRow and selRelaY <= sel2Row and (selRelaY == selRow and viewX >= selColumn or selRelaY ~= selRow) and (selRelaY == sel2Row and viewX < sel2Column or selRelaY ~= sel2Row)
 				if inSelection then
 					curType = -999
@@ -3454,7 +3439,7 @@ local function main()
 					local selRelaX = relaX-1
 					local posType = highlights[relaX]
 					
-					-- Selection Text Color
+					
 					local inSelection = selRelaY >= selRow and selRelaY <= sel2Row and (selRelaY == selRow and selRelaX >= selColumn or selRelaY ~= selRow) and (selRelaY == sel2Row and selRelaX < sel2Column or selRelaY ~= sel2Row)
 					if inSelection then
 						posType = -999
@@ -3474,7 +3459,7 @@ local function main()
 				end
 
 				local lastText = gsub(sub(lineText,colStart,viewX+maxCols),"['\"<>&]",richReplace)
-				--warn("SUB",colStart,viewX+maxCols-1)
+				
 				if #lastText > 0 then
 					resText = resText .. (curTemplate ~= textTemplate and (curTemplate .. lastText .. "</font>") or lastText)
 				end
@@ -3494,7 +3479,7 @@ local function main()
 			self.Frame.LineNumbers.Text = lineNumberStr
 			self:UpdateCursor()
 
-			--print("REFRESH TIME",tick()-start)
+			
 		end
 
 		funcs.UpdateView = function(self)
@@ -3563,7 +3548,7 @@ local function main()
 			self:MapNewLines()
 			self:PreHighlight()
 			self:Refresh()
-			--self.TextChanged:Fire()
+			
 		end
 		
 		funcs.ConvertText = function(self,text,toEditor)
@@ -3574,13 +3559,13 @@ local function main()
 			end
 		end
 
-		funcs.GetText = function(self) -- TODO: better (use new tab format)
+		funcs.GetText = function(self) 
 			local source = table.concat(self.Lines,"\n")
-			return self:ConvertText(source,false) -- Tab Convert
+			return self:ConvertText(source,false) 
 		end
 
 		funcs.SetText = function(self,txt)
-			txt = self:ConvertText(txt,true) -- Tab Convert
+			txt = self:ConvertText(txt,true) 
 			local lines = self.Lines
 			table.clear(lines)
 			local count = 1
@@ -3732,7 +3717,7 @@ local function main()
 			local checkmark = filler.checkmark
 			local ripples_container = checkbox.ripples
 
-			-- walls
+			
 			local top, bottom, left, right = filler.top, filler.bottom, filler.left, filler.right
 
 			self.Gui = checkbox
@@ -4075,7 +4060,7 @@ local function main()
 		return {new = new}
 	end)()
 
-	Lib.ColorPicker = (function() -- TODO: Convert to newer class model
+	Lib.ColorPicker = (function() 
 		local funcs = {}
 
 		local function new()
@@ -4554,7 +4539,7 @@ local function main()
 	end)()
 
 	Lib.NumberSequenceEditor = (function()
-		local function new() -- TODO: Convert to newer class model
+		local function new() 
 			local newMt = setmetatable({},{})
 			newMt.OnSelect = Lib.Signal.new()
 			newMt.OnCancel = Lib.Signal.new()
@@ -5029,7 +5014,7 @@ local function main()
 		return {new = new}
 	end)()
 
-	Lib.ColorSequenceEditor = (function() -- TODO: Convert to newer class model
+	Lib.ColorSequenceEditor = (function() 
 		local function new()
 			local newMt = setmetatable({},{})
 			newMt.OnSelect = Lib.Signal.new()
@@ -5746,7 +5731,6 @@ local function main()
 	return Lib
 end
 
--- TODO: Remove when open source
 if gethsfuncs then
 	_G.moduleData = {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 else
@@ -5755,16 +5739,10 @@ end
 
 end,
 ["Explorer"] = function()
---[[
-	Explorer App Module
-	
-	The main explorer interface
-]]
 
--- Common Locals
-local Main,Lib,Apps,Settings -- Main Containers
-local Explorer, Properties, ScriptViewer, Notebook -- Major Apps
-local API,RMD,env,service,plr,create,createSimple -- Main Locals
+local Main,Lib,Apps,Settings 
+local Explorer, Properties, ScriptViewer, Notebook 
+local API,RMD,env,service,plr,create,createSimple 
 
 local function initDeps(data)
 	Main = data.Main
@@ -5814,7 +5792,7 @@ local function main()
 		local rootParObj = ffa(root,"Instance")
 		local par = nodes[rootParObj]
 
-		-- Nil Handling
+		
 		if not par then
 			if nilMap[root] then
 				nilCons[root] = nilCons[root] or {
@@ -5838,7 +5816,7 @@ local function main()
 		local newNode = {Obj = root, Parent = par}
 		nodes[root] = newNode
 
-		-- Automatic sorting if expanded
+		
 		if sortingEnabled and expanded[par] and par.Sorted then
 			local left,right = 1,#par
 			local floor = math.floor
@@ -5874,7 +5852,7 @@ local function main()
 		local insts = getDescendants(root)
 		for i = 1,#insts do
 			local obj = insts[i]
-			if nodes[obj] then continue end -- Deferred
+			if nodes[obj] then continue end 
 			
 			local par = nodes[ffa(obj,"Instance")]
 			if not par then continue end
@@ -5882,7 +5860,7 @@ local function main()
 			nodes[obj] = newNode
 			par[#par+1] = newNode
 
-			-- Nil Handling
+			
 			if isNil then
 				nilMap[obj] = true
 				nilCons[obj] = nilCons[obj] or {
@@ -5909,7 +5887,7 @@ local function main()
 		local node = nodes[root]
 		if not node then return end
 
-		-- Nil Handling
+		
 		if nilMap[node.Obj] then
 			moveObject(node.Obj)
 			return
@@ -5950,7 +5928,7 @@ local function main()
 		local newPar = nodes[ffa(obj,"Instance")]
 		if oldPar == newPar then return end
 
-		-- Nil Handling
+		
 		if not newPar then
 			if nilMap[obj] then
 				newPar = nilNode
@@ -6098,7 +6076,7 @@ local function main()
 	end
 
 	Explorer.NodeSorter = function(a,b)
-		if a.Del or b.Del then return false end -- Ghost node
+		if a.Del or b.Del then return false end 
 
 		local aClass = a.Class
 		local bClass = b.Class
@@ -6176,7 +6154,7 @@ local function main()
 
 		recur(nodes[game],1)
 
-		-- Nil Instances
+		
 		if env.getnilinstances then
 			if not (isSearching and not searchResults[nilNode]) then
 				tree[count] = nilNode
@@ -6223,7 +6201,6 @@ local function main()
 			{5,"Frame",{BackgroundColor3=Color3.new(1,1,1),BorderSizePixel=0,Name="Line",Parent={1},Position=UDim2.new(1,-1,0,0),Size=UDim2.new(0,1,1,0),ZIndex=2,}},
 		})
 		dragOutline.Parent = treeFrame
-
 
 		local mouse = Main.Mouse or service.Players.LocalPlayer:GetMouse()
 		local function move()
@@ -7056,18 +7033,18 @@ local function main()
 		local nilInsts = env.getnilinstances()
 		local game = game
 		local getDescs = game.GetDescendants
-		--local newNilMap = {}
-		--local newNilRoots = {}
-		--local nilRoots = Explorer.NilRoots
-		--local connect = game.DescendantAdded.Connect
-		--local disconnect
-		--if not nilRoots then nilRoots = {} Explorer.NilRoots = nilRoots end
+		
+		
+		
+		
+		
+		
 
 		for i = 1,#nilInsts do
 			local obj = nilInsts[i]
 			if obj ~= game then
 				nilMap[obj] = true
-				--newNilRoots[obj] = true
+				
 
 				local descs = getDescs(obj)
 				for j = 1,#descs do
@@ -7076,16 +7053,10 @@ local function main()
 			end
 		end
 
-		-- Remove unmapped nil nodes
-		--[[for i = 1,#nilNode do
-			local node = nilNode[i]
-			if not newNilMap[node.Obj] then
-				nilMap[node.Obj] = nil
-				coroutine.wrap(removeObject)(node)
-			end
-		end]]
+		
+		
 
-		--nilMap = newNilMap
+		
 
 		for i = 1,#nilInsts do
 			local obj = nilInsts[i]
@@ -7093,27 +7064,10 @@ local function main()
 			if not node then coroutine.wrap(addObject)(obj) end
 		end
 
-		--[[
-		-- Remove old root connections
-		for obj in next,nilRoots do
-			if not newNilRoots[obj] then
-				if not disconnect then disconnect = obj[1].Disconnect end
-				disconnect(obj[1])
-				disconnect(obj[2])
-			end
-		end
 		
-		for obj in next,newNilRoots do
-			if not nilRoots[obj] then
-				nilRoots[obj] = {
-					connect(obj.DescendantAdded,addObject),
-					connect(obj.DescendantRemoving,removeObject)
-				}
-			end
-		end]]
 
-		--nilMap = newNilMap
-		--Explorer.NilRoots = newNilRoots
+		
+		
 
 		Explorer.Update()
 		Explorer.Refresh()
@@ -7222,10 +7176,8 @@ local function main()
 		Explorer.InsertObjectContext = context
 	end
 
-	--[[
-		Headers, Setups, Predicate, ObjectDefs
-	]]
-	Explorer.SearchFilters = { -- TODO: Use data table (so we can disable some if funcs don't exist)
+	
+	Explorer.SearchFilters = { 
 		Comparison = {
 			["isa"] = function(argString)
 				local lower = string.lower
@@ -7398,7 +7350,7 @@ local function main()
 			local nextData = foundData[nextInd] or {1}
 			local op = ops[nextData[2]]
 			local term = sub(query,init,nextInd-1)
-			term = match(term,"^%s*(.-)%s*$") or "" -- Trim
+			term = match(term,"^%s*(.-)%s*$") or "" 
 
 			if #term > 0 then
 				if sub(term,1,1) == "!" then
@@ -7446,7 +7398,7 @@ local function main()
 
 			if op then
 				finalPredicate = finalPredicate..op
-				if op == "(" and (#term > 0 or lastOp == ")") then -- Handle bracket glitch
+				if op == "(" and (#term > 0 or lastOp == ")") then 
 					return
 				else
 					lastOp = op
@@ -7554,14 +7506,14 @@ return search]==]
 			if Main.Elevated then
 				local start = tick()
 				searchFunc,specFilters = Explorer.BuildSearchFunc(query)
-				--print("BUILD SEARCH",tick()-start)
+				
 			else
 				searchFunc = defaultSearch
 			end
 
 			if specFilters then
 				table.clear(specResults)
-				for i = 1,#specFilters do -- Specific search filers that returns list of matches
+				for i = 1,#specFilters do 
 					local resMap = {}
 					specResults[i] = resMap
 					local objs = specFilters[i]()
@@ -7578,7 +7530,7 @@ return search]==]
 				local start = tick()
 				searchFunc(nodes[game])
 				searchFunc(nilNode)
-				--warn(tick()-start)
+				
 			end
 		end
 
@@ -7788,7 +7740,7 @@ return search]==]
 		end
 		holder:ClearAllChildren()
 
-		-- Updates theme
+		
 		for i,v in pairs(Explorer.SelectionVisualGui:GetChildren()) do
 			v.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
 		end
@@ -7881,7 +7833,7 @@ return search]==]
 			Explorer.Index = scrollV.Index
 			Explorer.Refresh()
 		end)
-		-- Mobile touch swipe scroll for Explorer tree
+		
 		do
 			local touchStartY, lastTouchY, accum = 0, 0, 0
 			treeFrame.InputBegan:Connect(function(inp)
@@ -7923,13 +7875,13 @@ return search]==]
 		scrollV.Gui.Parent = window.GuiElems.Content
 		scrollH.Gui.Parent = window.GuiElems.Content
 
-		-- Init stuff that requires the window
+		
 		Explorer.InitRenameBox()
 		Explorer.InitSearch()
 		Explorer.InitDelCleaner()
 		selection.Changed:Connect(Explorer.UpdateSelectionVisuals)
 
-		-- Window events
+		
 		window.GuiElems.Main:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 			if Explorer.Active then
 				Explorer.UpdateView()
@@ -7951,15 +7903,14 @@ return search]==]
 		window.OnDeactivate:Connect(function() Explorer.Active = false end)
 		window.OnMinimize:Connect(function() Explorer.Active = false end)
 
-		-- Settings
+		
 		autoUpdateSearch = Settings.Explorer.AutoUpdateSearch
 
-
-		-- Fill in nodes
+		
 		nodes[game] = {Obj = game}
 		expanded[nodes[game]] = true
 
-		-- Nil Instances
+		
 		if env.getnilinstances then
 			nodes[nilNode.Obj] = nilNode
 		end
@@ -7998,7 +7949,6 @@ return search]==]
 	return Explorer
 end
 
--- TODO: Remove when open source
 if gethsfuncs then
 	_G.moduleData = {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 else
@@ -8007,16 +7957,10 @@ end
 
 end,
 ["ScriptViewer"] = function()
---[[
-	Script Viewer App Module
-	
-	A script viewer that is basically a notepad
-]]
 
--- Common Locals
-local Main,Lib,Apps,Settings -- Main Containers
-local Explorer, Properties, ScriptViewer, Notebook -- Major Apps
-local API,RMD,env,service,plr,create,createSimple -- Main Locals
+local Main,Lib,Apps,Settings 
+local Explorer, Properties, ScriptViewer, Notebook 
+local API,RMD,env,service,plr,create,createSimple 
 
 local function initDeps(data)
 	Main = data.Main
@@ -8086,7 +8030,7 @@ local function main()
 		codeFrame.Frame.Size = UDim2.new(1,0,1,-20)
 		codeFrame.Frame.Parent = window.GuiElems.Content
 
-		-- TODO: REMOVE AND MAKE BETTER
+		
 		local copy = Instance.new("TextButton",window.GuiElems.Content)
 		copy.BackgroundTransparency = 1
 		copy.Size = UDim2.new(0.5,0,0,20)
@@ -8110,7 +8054,7 @@ local function main()
 			local filename = "Place_"..game.PlaceId.."_Script_"..os.time()..".txt"
 
 			writefile(filename,source)
-			if movefileas then -- TODO: USE ENV
+			if movefileas then 
 				movefileas(filename,".txt")
 			end
 		end)
@@ -8119,7 +8063,6 @@ local function main()
 	return ScriptViewer
 end
 
--- TODO: Remove when open source
 if gethsfuncs then
 	_G.moduleData = {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 else
@@ -8128,16 +8071,10 @@ end
 
 end,
 ["Properties"] = function()
---[[
-	Properties App Module
-	
-	The main properties interface
-]]
 
--- Common Locals
-local Main,Lib,Apps,Settings -- Main Containers
-local Explorer, Properties, ScriptViewer, Notebook -- Major Apps
-local API,RMD,env,service,plr,create,createSimple -- Main Locals
+local Main,Lib,Apps,Settings 
+local Explorer, Properties, ScriptViewer, Notebook 
+local API,RMD,env,service,plr,create,createSimple 
 
 local function initDeps(data)
 	Main = data.Main
@@ -8480,7 +8417,7 @@ local function main()
 										local propValSub = propVal
 
 										for j = 1,#indexes do
-											if not firstValSub or not propValSub then break end -- PhysicalProperties
+											if not firstValSub or not propValSub then break end 
 											local indexName = indexes[j]
 											firstValSub = firstValSub[indexName]
 											propValSub = propValSub[indexName]
@@ -8517,7 +8454,7 @@ local function main()
 		end
 	end
 
-	-- Fetches the properties to be displayed based on the explorer selection
+	
 	Properties.ShowExplorerProps = function()
 		local maxConflictCheck = Settings.Properties.MaxConflictCheck
 		local sList = Explorer.Selection.List
@@ -8606,10 +8543,10 @@ local function main()
 			end
 		end)
 
-		-- Find conflicts and get auto-update instances
+		
 		Properties.ClassLists = classLists
 		Properties.ComputeConflicts()
-		--warn("CONFLICT",tick()-start)
+		
 		if #props > 0 then
 			props[#props+1] = Properties.AddAttributeProp
 		end
@@ -8666,7 +8603,7 @@ local function main()
 		return subProp
 	end
 
-	Properties.GetExpandedProps = function(prop) -- TODO: Optimize using table
+	Properties.GetExpandedProps = function(prop) 
 		local result = {}
 		local typeData = prop.ValueType
 		local typeName = typeData.Name
@@ -8869,7 +8806,7 @@ local function main()
 				local sizeX = service.TextService:GetTextSize(dispName,14,Enum.Font.SourceSans,Vector2.new(math.huge,20)).X
 
 				fullNameFrame.TextLabel.Text = dispName
-				--fullNameFrame.Position = UDim2.new(0,Properties.EntryIndent*(prop.Depth or 1) + Properties.EntryOffset,0,23*(index-1))
+				
 				fullNameFrame.Size = UDim2.new(0,sizeX + 4,0,22)
 				fullNameFrame.Visible = true
 				Properties.FullNameFrameIndex = index
@@ -9232,7 +9169,7 @@ local function main()
 				Properties.SetProp(editor.CurrentProp,BrickColor.new(col))
 			end)
 
-			editor.OnMoreColors:Connect(function() -- TODO: Special Case BasePart.BrickColor to BasePart.Color
+			editor.OnMoreColors:Connect(function() 
 				editor:Close()
 				local colProp
 				for i,v in pairs(API.Classes.BasePart.Properties) do
@@ -9424,7 +9361,7 @@ local function main()
 		local offset = 4
 		local endOffset = 6
 
-		-- Offsetting the ValueBox for ValueType specific buttons
+		
 		if (typeName == "Color3" or typeName == "BrickColor" or typeName == "ColorSequence") then
 			colorButton.Visible = true
 			enumArrow.Visible = false
@@ -9452,7 +9389,7 @@ local function main()
 		valueBox.Position = UDim2.new(0,offset,0,0)
 		valueBox.Size = UDim2.new(1,-endOffset,1,0)
 
-		-- Right button
+		
 		if inputFullName == gName and typeData.Category == "Class" then
 			Main.MiscIcons:DisplayByKey(guiElems.RightButtonIcon, "Delete")
 			guiElems.RightButtonIcon.Visible = true
@@ -9466,7 +9403,7 @@ local function main()
 			rightButton.Visible = false
 		end
 
-		-- Displays the correct ValueBox for the ValueType, and sets it to the prop value
+		
 		if typeName == "bool" or typeName == "PhysicalProperties" then
 			valueBox.Visible = false
 			checkbox.Visible = true
@@ -9519,13 +9456,13 @@ local function main()
 		local stringSplit = string.split
 		local scaleType = Settings.Properties.ScaleType
 
-		-- Clear connections
+		
 		for i = 1,#propCons do
 			propCons[i]:Disconnect()
 		end
 		table.clear(propCons)
 
-		-- Hide full name viewer
+		
 		Properties.FullNameFrame.Visible = false
 		Properties.FullNameFrameAttach.Disable()
 
@@ -9559,7 +9496,7 @@ local function main()
 						guiElems.RowButton.Visible = true
 					end
 				else
-					-- Revert special row stuff
+					
 					nameFrame.Visible = true
 					guiElems.RowButton.Visible = false
 
@@ -9598,7 +9535,7 @@ local function main()
 						editAttributeButton.Visible = (prop.IsAttribute and not prop.RootType)
 						toggleAttributes.Visible = false
 
-						-- Moving around the frames
+						
 						if scaleType == 0 then
 							nameFrame.Size = UDim2.new(0,Properties.ViewWidth - leftOffset - 1,1,0)
 							valueFrame.Position = UDim2.new(0,Properties.ViewWidth,0,0)
@@ -9618,7 +9555,7 @@ local function main()
 						expand.Visible = typeData.Category == "DataType" and Properties.ExpandableTypes[typeName] or Properties.ExpandableProps[gName]
 						propNameBox.TextColor3 = tags.ReadOnly and Settings.Theme.PlaceholderText or Settings.Theme.Text
 
-						-- Display property value
+						
 						Properties.DisplayProp(prop,i)
 						if propObj then
 							if prop.IsAttribute then
@@ -9632,7 +9569,7 @@ local function main()
 							end
 						end
 
-						-- Position and resize Input Box
+						
 						local beforeVisible = valueBox.Visible
 						local inputFullName = inputProp and (inputProp.Class.."."..inputProp.Name..(inputProp.SubName or ""))
 						if gName == inputFullName then
@@ -9670,7 +9607,7 @@ local function main()
 						end
 					end
 
-					-- Expand
+					
 					if prop.CategoryName or Properties.ExpandableTypes[prop.ValueType and prop.ValueType.Name] or Properties.ExpandableProps[gName] then
 						if Lib.CheckMouseInGui(expand) then
 							Main.MiscIcons:DisplayByKey(expand.Icon, expanded[gName] and "Collapse_Over" or "Expand_Over")
@@ -9942,7 +9879,7 @@ local function main()
 		Properties.FullNameFrameAttach = Lib.AttachTo(fullNameFrame)
 	end
 
-	Properties.Init = function() -- TODO: MAKE BETTER
+	Properties.Init = function() 
 		local guiItems = create({
 			{1,"Folder",{Name="Items",}},
 			{2,"Frame",{BackgroundColor3=Color3.new(0.20392157137394,0.20392157137394,0.20392157137394),BorderSizePixel=0,Name="ToolBar",Parent={1},Size=UDim2.new(1,0,0,22),}},
@@ -9957,7 +9894,7 @@ local function main()
 			{11,"Frame",{BackgroundColor3=Color3.new(1,1,1),BackgroundTransparency=1,ClipsDescendants=true,Name="List",Parent={1},Position=UDim2.new(0,0,0,23),Size=UDim2.new(1,0,1,-23),}},
 		})
 
-		-- Vars
+		
 		categoryOrder =  API.CategoryOrder
 		for category,_ in next,categoryOrder do
 			if not Properties.CollapsedCategories[category] then
@@ -9966,7 +9903,7 @@ local function main()
 		end
 		expanded["Sound.SoundId"] = true
 
-		-- Init window
+		
 		window = Lib.Window.new()
 		Properties.Window = window
 		window:SetTitle("Properties")
@@ -9979,7 +9916,7 @@ local function main()
 
 		Properties.InitEntryStuff()
 
-		-- Window events
+		
 		window.GuiElems.Main:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
 			if Properties.Window:IsContentVisible() then
 				Properties.UpdateView()
@@ -9997,7 +9934,7 @@ local function main()
 			Properties.Refresh()
 		end)
 
-		-- Init scrollbars
+		
 		scrollV = Lib.ScrollBar.new()		
 		scrollV.WheelIncrement = 3
 		scrollV.Gui.Position = UDim2.new(1,-16,0,23)
@@ -10006,7 +9943,7 @@ local function main()
 			Properties.Index = scrollV.Index
 			Properties.Refresh()
 		end)
-		-- Mobile touch swipe scroll for Properties
+		
 		do
 			local touchStartY2, lastTouchY2, accum2 = 0, 0, 0
 			propsFrame.InputBegan:Connect(function(inp)
@@ -10036,7 +9973,7 @@ local function main()
 			Properties.Refresh()
 		end)
 
-		-- Setup Gui
+		
 		window.GuiElems.Line.Position = UDim2.new(0,0,0,22)
 		toolBar.Parent = window.GuiElems.Content
 		propsFrame.Parent = window.GuiElems.Content
@@ -10050,7 +9987,6 @@ local function main()
 	return Properties
 end
 
--- TODO: Remove when open source
 if gethsfuncs then
 	_G.moduleData = {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 else
@@ -10059,19 +9995,6 @@ end
 
 end,
 }
---[[
-	New Dex -- Enhanced Edition v2.0
-	Original by Moon | Extended build
-
-	Features:
-	  * Ultimate DumpGame v2 -- all useful services, smart filtering,
-	    CollectionService tags, Lighting, Teams, Sounds, player data,
-	    GC hidden instances, nil instances, loaded modules, remotes,
-	    decompile+save scripts, chunked flush (no crashes)
-	    teams, players, lighting, clscount, values, spy control
-	  * Click-to-Select -- click 3D part -> selects in Explorer
-	  * Settings GUI -- toggle all features, save to DexSettings.json
-]]
 
 local Main, Explorer, Properties, ScriptViewer
 local DefaultSettings, Notebook, Serializer, Lib
@@ -10289,12 +10212,12 @@ Main = (function()
 			if not func then Main.MissingEnv[#Main.MissingEnv+1]=name; return end
 			rawset(self,name,func)
 		end})
-		-- filesystem
+		
 		env.readfile   = rawget(_G,"readfile");   env.writefile  = rawget(_G,"writefile")
 		env.appendfile = rawget(_G,"appendfile"); env.makefolder = rawget(_G,"makefolder")
 		env.listfiles  = rawget(_G,"listfiles");  env.loadfile   = rawget(_G,"loadfile")
 		env.saveinstance = rawget(_G,"saveinstance")
-		-- debug introspection
+		
 		env.getupvalues  = (debug and debug.getupvalues)  or rawget(_G,"getupvals")
 		env.getconstants = (debug and debug.getconstants) or rawget(_G,"getconsts")
 		env.getprotos    = (debug and debug.getprotos)    or rawget(_G,"getprotos")
@@ -10302,10 +10225,10 @@ Main = (function()
 		env.checkcaller  = rawget(_G,"checkcaller")
 		env.getreg       = rawget(_G,"getreg")
 		env.getgc        = rawget(_G,"getgc")
-		-- hooks
+		
 		env.hookfunction = rawget(_G,"hookfunction") or rawget(_G,"replaceclosure") or (syn and syn.hookfunction)
 		env.newcclosure  = rawget(_G,"newcclosure")
-		-- misc
+		
 		env.setfflag         = rawget(_G,"setfflag")
 		env.decompile        = rawget(_G,"decompile")
 		env.protectgui       = rawget(_G,"protect_gui") or (syn and syn.protect_gui)
@@ -10742,9 +10665,9 @@ Main = (function()
 		end
 	end
 
-	-- ======================================================================
-	-- ULTIMATE DUMP v2
-	-- ======================================================================
+	
+	
+	
 	Main.DumpGame = function()
 		if not env.writefile then warn("[Dex] writefile unavailable -- dump aborted"); return end
 
@@ -10753,12 +10676,12 @@ Main = (function()
 		local sDir    = "dex/saved/scripts_"..TS
 		pcall(env.makefolder, sDir)
 
-		-- Safety caps
-		local YIELD_EVERY = 8   -- task.wait() every N instances (lower = safer)
-		local MAX_DEPTH   = 18  -- max tree depth
+		
+		local YIELD_EVERY = 8   
+		local MAX_DEPTH   = 18  
 		local instCount   = 0
 
-		-- Classes to skip entirely (no useful game-logic info)
+		
 		local SKIP_CLASS = {
 			Motor6D=true, Bone=true, WeldConstraint=true, Weld=true,
 			RigidConstraint=true, NoCollisionConstraint=true,
@@ -10777,7 +10700,7 @@ Main = (function()
 			Fire=true, Smoke=true, Sparkles=true,
 		}
 
-		-- Subtree names to skip
+		
 		local SKIP_NAME = {
 			Animate=true, RigAttachments=true, AvatarPartScaleType=true,
 			PlayerModule=true, RbxCharacterSounds=true, AtomicBinding=true,
@@ -10786,7 +10709,7 @@ Main = (function()
 			CorePackages=true,
 		}
 
-		-- Classes with SHORT property dump (avoid 60-prop spam per part)
+		
 		local LITE_PROPS = {
 			Part          = {"Position","Size","Color","Transparency","Anchored","CanCollide"},
 			MeshPart      = {"Position","Size","Color","Transparency","Anchored","CanCollide"},
@@ -10805,7 +10728,7 @@ Main = (function()
 			VehicleSeat   = {"Disabled","MaxSpeed"},
 		}
 
-		-- Classes that always get the FULL property dump
+		
 		local FULL_DUMP = {
 			RemoteEvent=true, RemoteFunction=true,
 			BindableEvent=true, BindableFunction=true,
@@ -10823,7 +10746,7 @@ Main = (function()
 			Folder=true,
 		}
 
-		-- Props to never filter even if zero/empty
+		
 		local ALWAYS_KEEP = {
 			Enabled=true,Position=true,Size=true,Text=true,
 			ActionText=true,ObjectText=true,Value=true,Health=true,
@@ -10832,7 +10755,7 @@ Main = (function()
 			DisplayName=true,Image=true,Volume=true,Looped=true,
 		}
 
-		-- Value serializer
+		
 		local function sv(val)
 			local t=typeof(val)
 			if t=="string" then
@@ -10855,7 +10778,7 @@ Main = (function()
 			else return "["..t.."]" end
 		end
 
-		-- Chunked output buffer
+		
 		local buf={}; local bufLines=0
 		local FLUSH_EVERY=120
 		local firstWrite=true
@@ -10877,10 +10800,10 @@ Main = (function()
 		local function sep() w(("-"):rep(60)) end
 		local function hdr(t) w(("="):rep(60)); w("  "..t); w(("="):rep(60)) end
 
-		-- Summary accumulators
+		
 		local remotes={}; local scripts={}; local sounds={}
 
-		-- API property cache
+		
 		local propCache={}
 		local function getProps(cn)
 			if propCache[cn]~=nil then return propCache[cn] end
@@ -10896,14 +10819,14 @@ Main = (function()
 			propCache[cn]=filtered; return filtered
 		end
 
-		-- Script saver
+		
 		local function saveScript(inst)
 			local src=""
 			pcall(function() src=inst.Source end)
 			if (src=="" or not src) and Settings.Dump.DecompileScripts and env.decompile then
 				local ok,dec=pcall(env.decompile,inst)
 				if ok and dec and dec~="" then src=dec end
-				task.wait() -- yield after decompile (expensive)
+				task.wait() 
 			end
 			if not src or src=="" then return nil,0 end
 			local fn=inst:GetFullName():gsub("[%./%\\%s]","_")..".lua"
@@ -10912,7 +10835,7 @@ Main = (function()
 			return fp,#src
 		end
 
-		-- Attribute dump
+		
 		local function dumpAttrs(inst,pad)
 			if not Settings.Dump.DumpAttributes then return end
 			local ok,attrs=pcall(function() return inst:GetAttributes() end)
@@ -10922,7 +10845,7 @@ Main = (function()
 			end
 		end
 
-		-- Tag dump
+		
 		local cs_ok, cs = pcall(function() return game:GetService("CollectionService") end)
 		local function dumpTags(inst, pad)
 			if not Settings.Dump.DumpTags or not cs_ok then return end
@@ -10932,7 +10855,7 @@ Main = (function()
 			end
 		end
 
-		-- Property dump
+		
 		local function dumpProps(inst,pad,cn)
 			local lite=LITE_PROPS[cn]
 			if lite then
@@ -10960,7 +10883,7 @@ Main = (function()
 			end
 		end
 
-		-- Iterative tree walker (no stack overflow)
+		
 		local function walk(root)
 			local stack={{root,1}}
 			local si=1
@@ -10984,14 +10907,14 @@ Main = (function()
 				local pad=("  "):rep(depth)
 				w(pad.."["..cn.."] "..nm)
 
-				-- Remote
+				
 				if cn=="RemoteEvent" or cn=="RemoteFunction"
 				or cn=="BindableEvent" or cn=="BindableFunction" then
 					local full=""; pcall(function() full=inst:GetFullName() end)
 					remotes[#remotes+1]="["..cn.."] "..full
 				end
 
-				-- Script
+				
 				if cn=="Script" or cn=="LocalScript" or cn=="ModuleScript" then
 					local full=""; pcall(function() full=inst:GetFullName() end)
 					local dis=false; pcall(function() dis=inst.Disabled end)
@@ -11007,7 +10930,7 @@ Main = (function()
 					end
 				end
 
-				-- Sound
+				
 				if cn=="Sound" and Settings.Dump.DumpSounds then
 					local full=""; pcall(function() full=inst:GetFullName() end)
 					local sid=""; pcall(function() sid=inst.SoundId end)
@@ -11019,7 +10942,7 @@ Main = (function()
 				dumpAttrs(inst,pad)
 				dumpTags(inst,pad)
 
-				-- Push children
+				
 				local skipChildren = depth >= MAX_DEPTH
 				local cok,children=pcall(function() return inst:GetChildren() end)
 				if cok and children and not skipChildren then
@@ -11033,7 +10956,7 @@ Main = (function()
 			end
 		end
 
-		-- ---- Begin dump ----
+		
 		hdr("DEX DUMP v2")
 		w("  PlaceId : "..tostring(game.PlaceId))
 		w("  JobId   : "..tostring(game.JobId))
@@ -11042,19 +10965,19 @@ Main = (function()
 		w("  Player  : "..tostring(plr.Name).." (UserId="..tostring(plr.UserId)..")")
 		w(("="):rep(60)); w("")
 
-		-- Services to dump (in priority order)
+		
 		local SERVICE_LIST = {
-			-- Highest value: remotes + module logic
+			
 			{name="ReplicatedStorage",   mode="full"},
 			{name="ReplicatedFirst",      mode="full"},
-			-- Workspace: all children (not just known folders)
+			
 			{name="Workspace",            mode="workspace"},
-			-- Player scripts + GUI (game-specific code)
+			
 			{name="Players",              mode="players"},
-			-- Starter content (often identical to player content but good to have)
+			
 			{name="StarterGui",           mode="full"},
 			{name="StarterPlayer",        mode="full"},
-			-- Teams/SoundService/Lighting: brief
+			
 			{name="Teams",                mode="full"},
 			{name="SoundService",         mode="full"},
 			{name="Lighting",             mode="full"},
@@ -11068,10 +10991,10 @@ Main = (function()
 			dumpAttrs(sv_inst,"")
 
 			if svc.mode=="workspace" then
-				-- Walk ALL workspace children (not just known folder names)
+				
 				local cok,wch = pcall(function() return sv_inst:GetChildren() end)
 				if cok then
-					-- Skip character models (just look for scripts inside)
+					
 					local SKIP_WS_NAMES = {
 						HumanoidRootPart=true, Head=true, UpperTorso=true, LowerTorso=true,
 					}
@@ -11079,7 +11002,7 @@ Main = (function()
 						local ok2,cname = pcall(function() return child.Name end)
 						local ok3,ccn   = pcall(function() return child.ClassName end)
 						if not ok2 or not ok3 then continue end
-						-- Character models: only extract scripts
+						
 						if ccn=="Model" then
 							local isChar = false
 							pcall(function()
@@ -11087,7 +11010,7 @@ Main = (function()
 								if hum then isChar=true end
 							end)
 							if isChar then
-								-- Only harvest scripts from character
+								
 								for _,v in ipairs(child:GetDescendants()) do
 									local ok4,cn4=pcall(function() return v.ClassName end)
 									if ok4 and (cn4=="LocalScript" or cn4=="Script" or cn4=="ModuleScript") then
@@ -11116,7 +11039,7 @@ Main = (function()
 					w("  [LocalPlayer] "..lp.Name.." uid="..tostring(lp.UserId))
 					dumpAttrs(lp,"  ")
 
-					-- PlayerGui: skip topbar/framework noise
+					
 					local SKIP_GUI = {
 						TopbarStandard=true, TopbarStandardClipped=true,
 						TopbarPlusGui=true, TopbarPlusReference=true,
@@ -11132,7 +11055,7 @@ Main = (function()
 						end
 					end
 
-					-- PlayerScripts: skip Roblox internals
+					
 					local SKIP_PS = {
 						PlayerModule=true, RbxCharacterSounds=true, AtomicBinding=true,
 					}
@@ -11146,12 +11069,12 @@ Main = (function()
 						end
 					end
 
-					-- Backpack (tools)
+					
 					local bp=lp:FindFirstChild("Backpack")
 					if bp then walk(bp); task.wait() end
 				end
 
-			else -- mode=="full"
+			else 
 				local cok2,children = pcall(function() return sv_inst:GetChildren() end)
 				if cok2 then
 					local SKIP_SVC_NAMES = {
@@ -11171,7 +11094,7 @@ Main = (function()
 			task.wait()
 		end
 
-		-- ---- Lighting detailed dump ----
+		
 		if Settings.Dump.DumpLighting then
 			local lok,lt = pcall(function() return game:GetService("Lighting") end)
 			if lok and lt then
@@ -11186,7 +11109,7 @@ Main = (function()
 					local ok2,v=pcall(function() return lt[p] end)
 					if ok2 then w("  "..p.."="..sv(v)) end
 				end
-				-- Atmosphere
+				
 				local atm = lt:FindFirstChildOfClass("Atmosphere")
 				if atm then
 					w("  [Atmosphere]")
@@ -11195,7 +11118,7 @@ Main = (function()
 						if ok3 then w("    "..p.."="..sv(v)) end
 					end
 				end
-				-- Sky/ColorCorrection/BloomEffect
+				
 				for _,child in ipairs(lt:GetChildren()) do
 					local ok4,ccn=pcall(function() return child.ClassName end)
 					if ok4 then
@@ -11206,7 +11129,7 @@ Main = (function()
 			end
 		end
 
-		-- ---- Teams ----
+		
 		if Settings.Dump.DumpTeams then
 			local tok,ts = pcall(function() return game:GetService("Teams") end)
 			if tok and ts then
@@ -11231,7 +11154,7 @@ Main = (function()
 			end
 		end
 
-		-- ---- Nil instances ----
+		
 		if Settings.Dump.ScanNilInstances and env.getnilinstances then
 			local ok,nils=pcall(env.getnilinstances)
 			if ok and nils and #nils>0 then
@@ -11244,7 +11167,7 @@ Main = (function()
 			end
 		end
 
-		-- ---- GC hidden instances ----
+		
 		if Settings.Dump.ScanGC and env.getgc then
 			local ok,gc=pcall(env.getgc,true)
 			if ok and gc then
@@ -11269,7 +11192,7 @@ Main = (function()
 						typeCounts[cn2]=(typeCounts[cn2] or 0)+1
 						w("  ["..cn2.."] "..nm2)
 					end
-					-- Class summary
+					
 					w("  -- Class breakdown --")
 					local sorted={}
 					for cn,n in pairs(typeCounts) do sorted[#sorted+1]={cn,n} end
@@ -11282,7 +11205,7 @@ Main = (function()
 			end
 		end
 
-		-- ---- GC scripts (hidden local scripts) ----
+		
 		if Settings.Dump.ScanGC and env.getgc and Settings.Dump.SaveScripts then
 			local ok,gc=pcall(env.getgc,true)
 			if ok and gc then
@@ -11311,7 +11234,7 @@ Main = (function()
 			end
 		end
 
-		-- ---- Loaded modules ----
+		
 		if Settings.Dump.ScanLoadedModules and env.getloadedmodules then
 			local ok,mods=pcall(env.getloadedmodules)
 			if ok and mods and #mods>0 then
@@ -11324,7 +11247,7 @@ Main = (function()
 			end
 		end
 
-		-- ---- CollectionService tags summary ----
+		
 		if Settings.Dump.DumpTags and cs_ok and cs then
 			local allTagged={}
 			pcall(function()
@@ -11354,7 +11277,7 @@ Main = (function()
 			end
 		end
 
-		-- ---- Remote summary ----
+		
 		if #remotes>0 then
 			hdr("REMOTE SUMMARY ("..#remotes..")")
 			table.sort(remotes)
@@ -11362,21 +11285,21 @@ Main = (function()
 			w("")
 		end
 
-		-- ---- Sound summary ----
+		
 		if #sounds>0 then
 			hdr("SOUND SUMMARY ("..#sounds..")")
 			for _,s in ipairs(sounds) do w("  "..s) end
 			w("")
 		end
 
-		-- ---- Script summary ----
+		
 		if #scripts>0 then
 			hdr("SAVED SCRIPTS ("..#scripts..")")
 			for _,s in ipairs(scripts) do w("  "..s) end
 			w("")
 		end
 
-		-- ---- Player attributes ----
+		
 		local pok2,pa=pcall(function() return plr:GetAttributes() end)
 		if pok2 and pa and next(pa) then
 			hdr("LOCAL PLAYER ATTRIBUTES")
@@ -11384,7 +11307,7 @@ Main = (function()
 			w("")
 		end
 
-		-- ---- Character attributes ----
+		
 		local char=plr.Character
 		if char then
 			local ca_ok,ca=pcall(function() return char:GetAttributes() end)
@@ -11395,7 +11318,7 @@ Main = (function()
 			end
 		end
 
-		-- ---- Workspace attributes ----
+		
 		local wok,wa=pcall(function() return workspace:GetAttributes() end)
 		if wok and wa and next(wa) then
 			hdr("WORKSPACE ATTRIBUTES")
@@ -11416,7 +11339,7 @@ Main = (function()
 		print("[Dex Dump v2] -> "..txtFile)
 	end
 
-	-- ---- Click-to-Select -----------------------------------------------
+	
 	Main.InitClickToSelect = function()
 		if Main.ClickToSelectConn then Main.ClickToSelectConn:Disconnect() end
 		if not Settings.Explorer.ClickToSelect then return end
@@ -11439,7 +11362,7 @@ Main = (function()
 		end)
 	end
 
-	-- ---- Settings GUI --------------------------------------------------
+	
 	Main.OpenSettingsGui = function()
 		if Main.SettingsGui then
 			Main.SettingsGui.Enabled=not Main.SettingsGui.Enabled; return
@@ -11631,12 +11554,12 @@ Main = (function()
 			end
 		end)
 
-		-- Core apps
+		
 		Main.CreateApp({Name="Explorer",   IconMap=Main.LargeIcons,Icon="Explorer",   Open=true,Window=Explorer.Window})
 		Main.CreateApp({Name="Properties", IconMap=Main.LargeIcons,Icon="Properties", Open=true,Window=Properties.Window})
 		Main.CreateApp({Name="Script View",IconMap=Main.LargeIcons,Icon="Script_Viewer",Window=ScriptViewer.Window})
 
-		-- Dump (one-shot trigger, auto-disables after click)
+		
 		Main.CreateApp({
 			Name="Dump",
 			IconMap=Main.MiscIcons, Icon="Save",
@@ -11650,7 +11573,7 @@ Main = (function()
 			end,
 		})
 
-		-- Settings gear
+		
 		gui.OpenButton.MainFrame.BottomFrame.Settings.MouseButton1Click:Connect(function()
 			Main.OpenSettingsGui()
 		end)
