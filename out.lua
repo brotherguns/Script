@@ -10290,30 +10290,31 @@ Main = (function()
 			rawset(self,name,func)
 		end})
 		-- filesystem
-		env.readfile   = readfile;   env.writefile  = writefile
-		env.appendfile = appendfile; env.makefolder = makefolder
-		env.listfiles  = listfiles;  env.loadfile   = loadfile
-		env.saveinstance = saveinstance
+		env.readfile   = rawget(_G,"readfile");   env.writefile  = rawget(_G,"writefile")
+		env.appendfile = rawget(_G,"appendfile"); env.makefolder = rawget(_G,"makefolder")
+		env.listfiles  = rawget(_G,"listfiles");  env.loadfile   = rawget(_G,"loadfile")
+		env.saveinstance = rawget(_G,"saveinstance")
 		-- debug introspection
-		env.getupvalues  = (debug and debug.getupvalues)  or getupvals
-		env.getconstants = (debug and debug.getconstants) or getconsts
-		env.getprotos    = (debug and debug.getprotos)    or getprotos
-		env.islclosure   = islclosure or is_l_closure
-		env.checkcaller  = checkcaller
-		env.getreg       = getreg
-		env.getgc        = getgc
+		env.getupvalues  = (debug and debug.getupvalues)  or rawget(_G,"getupvals")
+		env.getconstants = (debug and debug.getconstants) or rawget(_G,"getconsts")
+		env.getprotos    = (debug and debug.getprotos)    or rawget(_G,"getprotos")
+		env.islclosure   = rawget(_G,"islclosure") or rawget(_G,"is_l_closure")
+		env.checkcaller  = rawget(_G,"checkcaller")
+		env.getreg       = rawget(_G,"getreg")
+		env.getgc        = rawget(_G,"getgc")
 		-- hooks
-		env.hookfunction = hookfunction or replaceclosure or (syn and syn.hookfunction)
-		env.newcclosure  = newcclosure
+		env.hookfunction = rawget(_G,"hookfunction") or rawget(_G,"replaceclosure") or (syn and syn.hookfunction)
+		env.newcclosure  = rawget(_G,"newcclosure")
 		-- misc
-		env.setfflag         = setfflag
-		env.decompile        = decompile
-		env.protectgui       = protect_gui or (syn and syn.protect_gui)
-		env.gethui           = gethui
-		env.setclipboard     = setclipboard or toclipboard
-		env.getnilinstances  = getnilinstances or get_nil_instances
-		env.getloadedmodules = getloadedmodules
-		if identifyexecutor then Main.Executor = identifyexecutor() end
+		env.setfflag         = rawget(_G,"setfflag")
+		env.decompile        = rawget(_G,"decompile")
+		env.protectgui       = rawget(_G,"protect_gui") or (syn and syn.protect_gui)
+		env.gethui           = rawget(_G,"gethui")
+		env.setclipboard     = rawget(_G,"setclipboard") or rawget(_G,"toclipboard")
+		env.getnilinstances  = rawget(_G,"getnilinstances") or rawget(_G,"get_nil_instances")
+		env.getloadedmodules = rawget(_G,"getloadedmodules")
+		local ide = rawget(_G,"identifyexecutor")
+		if ide then Main.Executor = ide() end
 		Main.GuiHolder = Main.Elevated and service.CoreGui or plr:FindFirstChildOfClass("PlayerGui")
 		setmetatable(env,nil)
 	end
@@ -11692,12 +11693,15 @@ Main = (function()
 		intro.SetProgress("Fetching Roblox Version",.2)
 		if Main.Elevated then
 			local fv=Lib.ReadFile("dex/deps_version.dat")
-			Main.ClientVersion=Version()
+			Main.ClientVersion = (type(Version)=="function" and pcall(Version) and Version()) or "0.0.0.0"
 			if fv then
 				Main.DepsVersionData=string.split(fv,"\n")
 				if Main.LocalDepsUpToDate() then Main.RobloxVersion=Main.DepsVersionData[2] end
 			end
-			Main.RobloxVersion=Main.RobloxVersion or game:HttpGet("http://setup.roblox.com/versionQTStudio")
+			if not Main.RobloxVersion then
+				local ok,ver = pcall(function() return game:HttpGet("http://setup.roblox.com/versionQTStudio") end)
+				Main.RobloxVersion = (ok and ver) or "unknown"
+			end
 		end
 
 		intro.SetProgress("Fetching API",.35)
