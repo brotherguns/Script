@@ -10285,7 +10285,7 @@ local function main()
 	local function updateStatus()
 		if not (guiElems and guiElems.StatusLabel) then return end
 		guiElems.StatusLabel.Text = string.format(
-			"Visited: %d  Scripts: %d  Files: %d  Errors: %d  Queue: %d",
+			"Visited: %d  Scripts: %d  Files: %d  Errors: %d  Depth: %d",
 			stats.visited, stats.scripts, stats.files, stats.errors, stats.queued
 		)
 	end
@@ -10298,105 +10298,171 @@ local function main()
 	-- on every dequeue would be O(n^2) overall — a dump-killer.
 	-------------------------------------------------------------------
 
-	local function traverse(roots, writeInfo, decompile)
-		local queue = {}
-		local head, tail = 1, 0
+	-------------------------------------------------------------------
+	-- Core: iterative DFS traversal with path-component stack.
+	--
+	-- Why DFS and not BFS: BFS holds the entire frontier in memory
+	-- simultaneously. On a 90k-instance game the queue was hitting
+	-- ~60k entries, each with a ~100-300 char path string — tens of
+	-- MB of path strings alive at peak, which killed Delta.
+	--
+	-- DFS holds only the path from root to current node: typically
+	-- ~20 levels deep in a Roblox tree. The `frameStack` below tracks
+	-- (children array, index) per level. The `pathStack` holds one
+	-- sanitized component per level; full path is rebuilt with
+	-- table.concat on write (O(depth), not O(instance count)).
+	--
+	-- Memory is now bounded by tree depth × avg sibling count, not
+	-- total instance count.
+	-------------------------------------------------------------------
 
-		for i = 1, #roots do
-			tail = tail + 1
-			queue[tail] = roots[i]
+	local function processInstance(inst, folderPath, writeInfo, decompile)
+		local className = safeGet(inst, "ClassName") or "Unknown"
+		local name = safeGet(inst, "Name") or "_"
+
+		ensureFolder(folderPath)
+
+		if writeInfo then
+			local okFull, fullPath = pcall(_getFullName, inst)
+			if not okFull then fullPath = name end
+			local infoOk = pcall(env.writefile,
+				folderPath .. "/.info.txt",
+				buildInfoText(inst, fullPath))
+			if infoOk then
+				stats.files = stats.files + 1
+			else
+				stats.errors = stats.errors + 1
+			end
 		end
 
+		if SCRIPT_CLASSES[className] then
+			local source, kind = extractScriptSource(inst, decompile)
+			local scriptFileName = sanitizeComponent(name) .. ".lua"
+			local header = "-- " .. className .. " | kind: " .. kind .. "\n\n"
+
+			local writeOk = pcall(env.writefile,
+				folderPath .. "/" .. scriptFileName,
+				header .. source)
+			if writeOk then
+				stats.scripts = stats.scripts + 1
+				stats.files = stats.files + 1
+			else
+				stats.errors = stats.errors + 1
+			end
+			-- Source reference dropped at function return.
+		end
+	end
+
+	local function traverse(roots, writeInfo, decompile)
 		local visited = {}
 
-		while head <= tail do
+		for rootIdx = 1, #roots do
 			if cancelRequested then break end
 
-			local entry = queue[head]
-			queue[head] = nil -- release the slot for GC
-			head = head + 1
+			local rootEntry = roots[rootIdx]
+			local rootInst = rootEntry.inst
+			local rootPath = rootEntry.path
 
-			local inst = entry.inst
-			local folderPath = entry.path
+			if rootInst and not visited[rootInst] then
+				-- frameStack[i] = { children = {...}, index = int, usedNames = {} }
+				--   One frame per open ancestor. `index` is the next
+				--   child to visit at that level.
+				-- pathStack[i]  = string component at level i (not
+				--   including the root path prefix).
+				local frameStack = {}
+				local pathStack = {}
+				local stackTop = 0
 
-			if inst and not visited[inst] then
-				visited[inst] = true
+				-- Process the root itself.
+				visited[rootInst] = true
 				stats.visited = stats.visited + 1
+				processInstance(rootInst, rootPath, writeInfo, decompile)
 
-				local className = safeGet(inst, "ClassName") or "Unknown"
-				local name = safeGet(inst, "Name") or "_"
-
-				ensureFolder(folderPath)
-
-				if writeInfo then
-					local okFull, fullPath = pcall(_getFullName, inst)
-					if not okFull then fullPath = name end
-					local infoOk = pcall(env.writefile,
-						folderPath .. "/.info.txt",
-						buildInfoText(inst, fullPath))
-					if infoOk then
-						stats.files = stats.files + 1
-					else
-						stats.errors = stats.errors + 1
-					end
+				-- Seed the first frame with root's children.
+				local okKids, kids = pcall(_getChildren, rootInst)
+				if okKids and type(kids) == "table" then
+					stackTop = 1
+					frameStack[1] = { children = kids, index = 1, usedNames = {} }
 				end
 
-				if SCRIPT_CLASSES[className] then
-					local source, kind = extractScriptSource(inst, decompile)
-					local scriptFileName = sanitizeComponent(name) .. ".lua"
-					local header = "-- " .. className .. " | kind: " .. kind .. "\n\n"
+				-- Main DFS loop.
+				while stackTop > 0 do
+					if cancelRequested then break end
 
-					local writeOk = pcall(env.writefile,
-						folderPath .. "/" .. scriptFileName,
-						header .. source)
-					if writeOk then
-						stats.scripts = stats.scripts + 1
-						stats.files = stats.files + 1
+					local frame = frameStack[stackTop]
+					local children = frame.children
+					local i = frame.index
+
+					if i > #children then
+						-- Done with this level; pop.
+						frameStack[stackTop] = nil
+						pathStack[stackTop] = nil
+						stackTop = stackTop - 1
 					else
-						stats.errors = stats.errors + 1
-					end
-
-					-- Drop the source string reference so GC can reclaim
-					-- it. With 10k scripts at ~a few KB each, holding
-					-- every source alive was a major memory vector.
-					source = nil
-				end
-
-				local okChildren, children = pcall(_getChildren, inst)
-				if okChildren and type(children) == "table" then
-					local usedNames = {}
-					for i = 1, #children do
+						frame.index = i + 1
 						local child = children[i]
+
 						if child and not visited[child] then
+							visited[child] = true
+							stats.visited = stats.visited + 1
+
+							-- Compute child path component.
 							local childName = safeGet(child, "Name")
 							if not childName or childName == "" then
 								childName = safeGet(child, "ClassName") or "_"
 							end
 							local base = sanitizeComponent(childName)
-							local n = (usedNames[base] or 0) + 1
-							usedNames[base] = n
+							local n = (frame.usedNames[base] or 0) + 1
+							frame.usedNames[base] = n
 							local comp = (n == 1) and base or (base .. "_" .. n)
 
-							tail = tail + 1
-							queue[tail] = {
-								inst = child,
-								path = folderPath .. "/" .. comp,
-							}
+							-- Child lives at depth `stackTop` (we're
+							-- processing the stackTop'th open frame's
+							-- children). Store the component there.
+							pathStack[stackTop] = comp
+
+							-- Build the full path: rootPath / pathStack[1..stackTop]
+							local childPath
+							if stackTop == 1 then
+								childPath = rootPath .. "/" .. comp
+							else
+								local tmp = { rootPath }
+								for s = 1, stackTop do
+									tmp[s + 1] = pathStack[s]
+								end
+								childPath = table.concat(tmp, "/")
+							end
+
+							processInstance(child, childPath, writeInfo, decompile)
+
+							-- Descend into child's children if any.
+							local okCKids, cKids = pcall(_getChildren, child)
+							if okCKids and type(cKids) == "table" and #cKids > 0 then
+								stackTop = stackTop + 1
+								frameStack[stackTop] = {
+									children = cKids,
+									index = 1,
+									usedNames = {},
+								}
+							end
+							-- If no descent, pathStack[stackTop] will be
+							-- overwritten by the next sibling or cleared
+							-- when this level finishes.
+						end
+
+						if stats.visited % YIELD_EVERY == 0 then
+							stats.queued = stackTop
+							if stats.visited % UI_UPDATE_EVERY == 0 then
+								updateStatus()
+							end
+							Lib.FastWait()
 						end
 					end
-				end
-
-				if stats.visited % YIELD_EVERY == 0 then
-					stats.queued = tail - head + 1
-					if stats.visited % UI_UPDATE_EVERY == 0 then
-						updateStatus()
-					end
-					Lib.FastWait()
 				end
 			end
 		end
 
-		stats.queued = tail - head + 1
+		stats.queued = 0
 		updateStatus()
 	end
 
