@@ -10107,6 +10107,7 @@ local function main()
 	local options = {
 		WriteInfoFiles = false,
 		OrphanSweep    = false,
+		SkipExisting   = true,
 	}
 
 	-------------------------------------------------------------------
@@ -10167,6 +10168,19 @@ local function main()
 		if type(fn) == "function" then
 			local ok, res = pcall(fn)
 			if ok and type(res) == "table" then return res end
+		end
+		return nil
+	end
+
+	-- Probes the executor for an isfile()-equivalent. Used by the
+	-- SkipExisting option to resume interrupted dumps. Returns nil if
+	-- the executor doesn't expose one, in which case we can't skip.
+	local function resolveIsFile()
+		local g = getfenv(0)
+		local candidates = { "isfile", "is_file", "file_exists" }
+		for _, n in ipairs(candidates) do
+			local fn = rawget(g, n)
+			if type(fn) == "function" then return fn end
 		end
 		return nil
 	end
@@ -10285,8 +10299,8 @@ local function main()
 	local function updateStatus()
 		if not (guiElems and guiElems.StatusLabel) then return end
 		guiElems.StatusLabel.Text = string.format(
-			"Visited: %d  Scripts: %d  Files: %d  Errors: %d  Depth: %d",
-			stats.visited, stats.scripts, stats.files, stats.errors, stats.queued
+			"Visited: %d  Scripts: %d  Skipped: %d  Errors: %d  Depth: %d",
+			stats.visited, stats.scripts, stats.skipped, stats.errors, stats.queued
 		)
 	end
 
@@ -10316,33 +10330,45 @@ local function main()
 	-- total instance count.
 	-------------------------------------------------------------------
 
-	local function processInstance(inst, folderPath, writeInfo, decompile)
+	local function processInstance(inst, folderPath, writeInfo, decompile, isFile, skipExisting)
 		local className = safeGet(inst, "ClassName") or "Unknown"
 		local name = safeGet(inst, "Name") or "_"
 
-		ensureFolder(folderPath)
+		local needsFolder = writeInfo or SCRIPT_CLASSES[className]
 
-		if writeInfo then
-			local okFull, fullPath = pcall(_getFullName, inst)
-			if not okFull then fullPath = name end
-			local infoOk = pcall(env.writefile,
-				folderPath .. "/.info.txt",
-				buildInfoText(inst, fullPath))
-			if infoOk then
-				stats.files = stats.files + 1
-			else
-				stats.errors = stats.errors + 1
-			end
+		-- Lazy folder creation: only call makefolder when we're
+		-- actually going to write something into it. Creating folders
+		-- for every BasePart/GUI element on a 100k-instance game
+		-- bled the executor's per-session file-op budget dry before
+		-- we finished traversing.
+		if not needsFolder then
+			return
 		end
 
+		-- Script write path (check existence BEFORE makefolder so we
+		-- don't even touch the fs for already-dumped scripts).
 		if SCRIPT_CLASSES[className] then
-			local source, kind = extractScriptSource(inst, decompile)
 			local scriptFileName = sanitizeComponent(name) .. ".lua"
+			local scriptPath = folderPath .. "/" .. scriptFileName
+
+			-- Resume support: if the file already exists from a prior
+			-- run, skip it entirely. Saves both the decompile() call
+			-- (the slowest part of a dump) and the writefile call.
+			if skipExisting and isFile then
+				local ok, exists = pcall(isFile, scriptPath)
+				if ok and exists then
+					stats.skipped = stats.skipped + 1
+					-- Don't create the folder either — it's already there.
+					return
+				end
+			end
+
+			ensureFolder(folderPath)
+
+			local source, kind = extractScriptSource(inst, decompile)
 			local header = "-- " .. className .. " | kind: " .. kind .. "\n\n"
 
-			local writeOk = pcall(env.writefile,
-				folderPath .. "/" .. scriptFileName,
-				header .. source)
+			local writeOk = pcall(env.writefile, scriptPath, header .. source)
 			if writeOk then
 				stats.scripts = stats.scripts + 1
 				stats.files = stats.files + 1
@@ -10350,10 +10376,49 @@ local function main()
 				stats.errors = stats.errors + 1
 			end
 			-- Source reference dropped at function return.
+
+			-- If info files are ALSO requested, write those too.
+			if writeInfo then
+				local okFull, fullPath = pcall(_getFullName, inst)
+				if not okFull then fullPath = name end
+				local infoOk = pcall(env.writefile,
+					folderPath .. "/.info.txt",
+					buildInfoText(inst, fullPath))
+				if infoOk then
+					stats.files = stats.files + 1
+				else
+					stats.errors = stats.errors + 1
+				end
+			end
+			return
+		end
+
+		-- Info-only path (non-script instance, but user wants info).
+		ensureFolder(folderPath)
+
+		if writeInfo then
+			local infoPath = folderPath .. "/.info.txt"
+			if skipExisting and isFile then
+				local ok, exists = pcall(isFile, infoPath)
+				if ok and exists then
+					stats.skipped = stats.skipped + 1
+					return
+				end
+			end
+
+			local okFull, fullPath = pcall(_getFullName, inst)
+			if not okFull then fullPath = name end
+			local infoOk = pcall(env.writefile, infoPath,
+				buildInfoText(inst, fullPath))
+			if infoOk then
+				stats.files = stats.files + 1
+			else
+				stats.errors = stats.errors + 1
+			end
 		end
 	end
 
-	local function traverse(roots, writeInfo, decompile)
+	local function traverse(roots, writeInfo, decompile, isFile, skipExisting)
 		local visited = {}
 
 		for rootIdx = 1, #roots do
@@ -10376,7 +10441,7 @@ local function main()
 				-- Process the root itself.
 				visited[rootInst] = true
 				stats.visited = stats.visited + 1
-				processInstance(rootInst, rootPath, writeInfo, decompile)
+				processInstance(rootInst, rootPath, writeInfo, decompile, isFile, skipExisting)
 
 				-- Seed the first frame with root's children.
 				local okKids, kids = pcall(_getChildren, rootInst)
@@ -10433,7 +10498,7 @@ local function main()
 								childPath = table.concat(tmp, "/")
 							end
 
-							processInstance(child, childPath, writeInfo, decompile)
+							processInstance(child, childPath, writeInfo, decompile, isFile, skipExisting)
 
 							-- Descend into child's children if any.
 							local okCKids, cKids = pcall(_getChildren, child)
@@ -10480,29 +10545,36 @@ local function main()
 		running = true
 		cancelRequested = false
 		createdFolders = {}
-		stats = { visited = 0, scripts = 0, files = 0, errors = 0, queued = 0 }
+		stats = { visited = 0, scripts = 0, files = 0, errors = 0, queued = 0, skipped = 0 }
 		logLines = {}
 
 		if guiElems and guiElems.StartButton then
 			guiElems.StartButton.Text = "Cancel Dump"
 		end
 
-		local root = string.format("dex/dumps/%s_%d",
-			tostring(game.PlaceId), os.time())
+		-- Stable output path (no timestamp) so re-running into the
+		-- same folder lets SkipExisting pick up where a crashed prior
+		-- run left off.
+		local root = string.format("dex/dumps/%s", tostring(game.PlaceId))
 		ensureFolder("dex")
 		ensureFolder("dex/dumps")
 		ensureFolder(root)
 
 		local writeInfo = options.WriteInfoFiles
 		local doOrphanSweep = options.OrphanSweep
+		local skipExisting = options.SkipExisting
 		local decompile = resolveDecompiler()
+		local isFile = resolveIsFile()
 
 		log("Dump started.")
 		log("Output: " .. root)
-		log(string.format("Options: info=%s  orphanSweep=%s",
-			tostring(writeInfo), tostring(doOrphanSweep)))
+		log(string.format("Options: info=%s skip=%s sweep=%s",
+			tostring(writeInfo), tostring(skipExisting), tostring(doOrphanSweep)))
 		if not decompile then
 			log("Warning: no decompile() found; scripts will be empty.")
+		end
+		if skipExisting and not isFile then
+			log("Note: skipExisting requested but no isfile() found — will re-write all.")
 		end
 
 		local roots = { { inst = game, path = root .. "/game" } }
@@ -10511,7 +10583,6 @@ local function main()
 		if nilList then
 			log(string.format("Adding %d nil roots.", #nilList))
 			local nilRoot = root .. "/NilInstances"
-			ensureFolder(nilRoot)
 			local counter = 0
 			for i = 1, #nilList do
 				local inst = nilList[i]
@@ -10531,14 +10602,13 @@ local function main()
 			log("getnilinstances() unavailable — nil pass skipped.")
 		end
 
-		traverse(roots, writeInfo, decompile)
+		traverse(roots, writeInfo, decompile, isFile, skipExisting)
 
 		if not cancelRequested and doOrphanSweep then
 			local all = tryGetAllInstances()
 			if all then
 				log(string.format("Orphan sweep: %d instances...", #all))
 				local sweepRoot = root .. "/_Orphans"
-				ensureFolder(sweepRoot)
 				local orphanRoots = {}
 				for i = 1, #all do
 					local inst = all[i]
@@ -10551,7 +10621,7 @@ local function main()
 						}
 					end
 				end
-				traverse(orphanRoots, writeInfo, decompile)
+				traverse(orphanRoots, writeInfo, decompile, isFile, skipExisting)
 			end
 		end
 
@@ -10559,8 +10629,8 @@ local function main()
 			log("Dump cancelled.")
 		else
 			log("Dump complete.")
-			log(string.format("Totals: %d instances, %d scripts, %d files, %d errors.",
-				stats.visited, stats.scripts, stats.files, stats.errors))
+			log(string.format("Totals: %d visited, %d scripts, %d files, %d skipped, %d errors.",
+				stats.visited, stats.scripts, stats.files, stats.skipped, stats.errors))
 		end
 
 		running = false
@@ -10636,15 +10706,18 @@ local function main()
 			.. "Scripts are decompiled to .lua files."
 		desc.Parent = content
 
-		makeCheckbox(content, 44, "Write .info.txt sidecars (slower, many files)",
+		makeCheckbox(content, 44, "Skip existing files (resume crashed dump)",
+			options.SkipExisting, function(v) options.SkipExisting = v end)
+
+		makeCheckbox(content, 66, "Write .info.txt sidecars (slower, many files)",
 			options.WriteInfoFiles, function(v) options.WriteInfoFiles = v end)
 
-		makeCheckbox(content, 66, "Orphan sweep via getinstances() (slower)",
+		makeCheckbox(content, 88, "Orphan sweep via getinstances() (slower)",
 			options.OrphanSweep, function(v) options.OrphanSweep = v end)
 
 		local status = Instance.new("TextLabel")
 		status.BackgroundTransparency = 1
-		status.Position = UDim2.new(0, 8, 0, 94)
+		status.Position = UDim2.new(0, 8, 0, 116)
 		status.Size = UDim2.new(1, -16, 0, 20)
 		status.Font = Enum.Font.Code
 		status.TextSize = 13
@@ -10655,8 +10728,8 @@ local function main()
 		guiElems.StatusLabel = status
 
 		local logScroll = Instance.new("ScrollingFrame")
-		logScroll.Position = UDim2.new(0, 8, 0, 118)
-		logScroll.Size = UDim2.new(1, -16, 1, -156)
+		logScroll.Position = UDim2.new(0, 8, 0, 140)
+		logScroll.Size = UDim2.new(1, -16, 1, -178)
 		logScroll.BackgroundColor3 = Settings.Theme.TextBox
 		logScroll.BorderColor3 = Settings.Theme.Outline3
 		logScroll.BorderSizePixel = 1
