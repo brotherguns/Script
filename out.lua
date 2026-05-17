@@ -1,953 +1,4 @@
 local EmbeddedModules = {
-["Dumper"] = function()
---[[
-	Dumper App Module
-
-	Game-dump feature for Dex, optimized for mobile executors with
-	strict per-session runtime/filesystem budgets.
-
-	Strategy: FLAT SCAN.
-		- Instead of iteratively traversing the game tree in Lua
-		  (which is what killed previous versions — 100k+ Lua-level
-		  iterations just to find the ~18k actual scripts), we call
-		  game:GetDescendants() ONCE. That's a single C++ call that
-		  returns a flat array of every instance.
-		- We filter that array to scripts only, then write each one.
-		- We reconstruct the on-disk folder structure from each
-		  script's :GetFullName(), so the Explorer hierarchy is
-		  preserved exactly like it was before.
-		- Folders are only created when we actually write a script
-		  into them. Non-script instances are never touched.
-
-	This cuts the per-instance Lua work by ~5x on games where only
-	~17% of instances are scripts (typical). On a 110k-instance game
-	we go from ~110k Lua iterations down to ~18k.
-
-	Resume support:
-		- Output path is stable: dex/dumps/<PlaceId>/ (no timestamp)
-		- Each script's target path is checked with isfile/listfiles
-		  before writing. If it already exists, we skip.
-		- Resume probe tries both rawget(_G, "isfile") and a direct
-		  pcall, since mobile executors sometimes stash these in
-		  nonstandard locations.
-]]
-
--- Common Locals
-local Main, Lib, Apps, Settings
-local Explorer, Properties, ScriptViewer, Notebook
-local API, RMD, env, service, plr, create, createSimple
-
-local function initDeps(data)
-	Main = data.Main
-	Lib = data.Lib
-	Apps = data.Apps
-	Settings = data.Settings
-
-	API = data.API
-	RMD = data.RMD
-	env = data.env
-	service = data.service
-	plr = data.plr
-	create = data.create
-	createSimple = data.createSimple
-end
-
-local function initAfterMain()
-	Explorer = Apps.Explorer
-	Properties = Apps.Properties
-	ScriptViewer = Apps.ScriptViewer
-	Notebook = Apps.Notebook
-end
-
-local function main()
-	local Dumper = {}
-
-	-------------------------------------------------------------------
-	-- Config
-	-------------------------------------------------------------------
-
-	local YIELD_EVERY_SCRIPT = 25      -- yield after N scripts processed
-	local UI_UPDATE_EVERY    = 50      -- status label update cadence
-	local MAX_COMPONENT_LEN  = 120
-	local MAX_LOG_LINES      = 30
-
-	local SCRIPT_CLASSES = {
-		LocalScript = true,
-		ModuleScript = true,
-		Script = true,
-	}
-
-	-------------------------------------------------------------------
-	-- State
-	-------------------------------------------------------------------
-
-	local running = false
-	local cancelRequested = false
-	local stats
-	local logLines = {}
-	local window, guiElems
-
-	local options = {
-		SkipExisting   = true,
-		IncludeNil     = true,
-		FilterCoreUI   = true,   -- skip CoreGui/built-in Roblox UI
-		FilterLibs     = true,   -- skip well-known OSS libs (Promise, Roact, etc.)
-		SkipLargeScripts = true, -- skip obfuscated/packed scripts over MAX_SCRIPT_BYTES
-	}
-
-	-- Scripts larger than this are almost always obfuscated or
-	-- packed bundles (Luraph, IronBrew, etc.). They eat decompile
-	-- time and memory for output nobody wants.
-	local MAX_SCRIPT_BYTES = 500 * 1024  -- 500KB
-
-	-- Pattern-match exclusions. Matched against the full name
-	-- (game.PlayerGui.StarterGui.SomeScript). Lua patterns, so
-	-- remember % escapes dots in Lua — but GetFullName() uses
-	-- literal dots as separators, so in practice `.` in our
-	-- patterns matches any char which is usually fine.
-	local CORE_UI_PATTERNS = {
-		"^CoreGui%.",
-		"^game%.CoreGui%.",
-		-- Roblox built-in chat
-		"%.Chat$", "%.Chat%.",
-		"ChatServiceRunner",
-		-- Built-in player list / leaderboard
-		"PlayerListScript",
-		"PlayerListManager",
-		-- Built-in emote
-		"EmotesMenu",
-		-- Settings / topbar
-		"SettingsHub",
-		"TopbarPlus",
-		-- Loading / splash
-		"LoadingScreen",
-		-- Localization bootstrap
-		"LocalizationTable",
-		-- Built-in purchase prompts
-		"PurchasePrompt",
-		"PromptCreator",
-	}
-
-	local LIB_PATTERNS = {
-		-- Common vendored libraries — source is on GitHub, you don't
-		-- need to decompile them.
-		"Promise$", "%.Promise%.",
-		"Roact$", "%.Roact%.",
-		"Fusion$", "%.Fusion%.",
-		"Knit$", "%.Knit%.",
-		"Matter$", "%.Matter%.",
-		"Rodux$", "%.Rodux%.",
-		"Signal$", "%.Signal%.",
-		"Maid$", "%.Maid%.",
-		"Janitor$", "%.Janitor%.",
-		"Trove$", "%.Trove%.",
-		"Middleclass", "Middleware",
-		"TweenService%+", "TweenService%+%.",
-		"Net$", "%.Net%.",          -- Sleitnick's Net
-		"Comm$", "%.Comm%.",        -- RBXNet / Knit Comm
-		"Tabby",                    -- popular UI lib
-		"OrionLib",                 -- popular UI lib
-		"Kavo",                     -- popular UI lib
-		"Rayfield",                 -- popular UI lib
-		"UILibrary", "UI_Library",
-	}
-
-	-------------------------------------------------------------------
-	-- Path sanitization
-	-------------------------------------------------------------------
-
-	local FORBIDDEN_PATTERN = "[%z\1-\31<>:\"/\\|%?%*]"
-	local RESERVED_NAMES = {
-		CON=true, PRN=true, AUX=true, NUL=true,
-		COM1=true, COM2=true, COM3=true, COM4=true, COM5=true,
-		COM6=true, COM7=true, COM8=true, COM9=true,
-		LPT1=true, LPT2=true, LPT3=true, LPT4=true, LPT5=true,
-		LPT6=true, LPT7=true, LPT8=true, LPT9=true,
-	}
-
-	local function sanitizeComponent(name)
-		if type(name) ~= "string" then name = tostring(name) end
-		name = string.gsub(name, FORBIDDEN_PATTERN, "_")
-		name = string.gsub(name, "^[%s%.]+", "")
-		name = string.gsub(name, "[%s%.]+$", "")
-		if name == "" then name = "_" end
-		local stem = string.match(string.upper(name), "^([^%.]+)") or name
-		if RESERVED_NAMES[stem] then name = "_" .. name end
-		if #name > MAX_COMPONENT_LEN then
-			name = string.sub(name, 1, MAX_COMPONENT_LEN)
-		end
-		return name
-	end
-
-	-------------------------------------------------------------------
-	-- Capability detection
-	--
-	-- Executor globals can live in different places on different
-	-- executors. We probe every reasonable location before giving up.
-	-------------------------------------------------------------------
-
-	local function hasFilesystemAPI()
-		return type(env.writefile) == "function"
-			and type(env.makefolder) == "function"
-	end
-
-	local function probeGlobal(names)
-		local g = getfenv(0)
-		for _, n in ipairs(names) do
-			local fn = rawget(g, n)
-			if type(fn) == "function" then return fn end
-		end
-		-- Also try _G directly (some executors inject there).
-		if _G then
-			for _, n in ipairs(names) do
-				local fn = rawget(_G, n)
-				if type(fn) == "function" then return fn end
-			end
-		end
-		return nil
-	end
-
-	local function resolveDecompiler()
-		if type(env.decompile) == "function" then return env.decompile end
-		return probeGlobal({ "decompile" })
-	end
-
-	-- Returns (probeFn, methodName) or (nil, nil).
-	-- probeFn has signature (path) -> bool.
-	--
-	-- Preference order:
-	--   1. Real isfile() if the executor has one — O(1) per check.
-	--   2. Prebuild an existence set via recursive listfiles() over
-	--      the output dir, then check the set. O(totalExistingFiles)
-	--      upfront, O(1) per check after. Much cheaper than readfile
-	--      on resume when lots of files already exist.
-	--   3. readfile-based probe — works everywhere but reads the
-	--      file contents on every hit. Fine for fresh runs where
-	--      most paths don't exist yet.
-	local function resolveIsFile(outputRoot)
-		local fn = probeGlobal({ "isfile", "is_file", "file_exists" })
-		if fn then return fn, "isfile" end
-
-		local listfiles = env.listfiles or probeGlobal({ "listfiles", "list_files" })
-		if type(listfiles) == "function" then
-			-- Build a set of existing file paths for O(1) resume checks.
-			--
-			-- Previous version stored three variants (raw, normalized,
-			-- relative) and recursed into every entry — 3x memory and
-			-- a wasted listfiles call per file. On a 60k-file tree that
-			-- was ~18MB of strings and ~60k extra listfiles calls,
-			-- which killed Delta mid-scan.
-			--
-			-- New version:
-			--   * Stores ONE canonical form per path: forward-slashed,
-			--     with the absolute prefix stripped down to our
-			--     outputRoot. This matches exactly what writeScript
-			--     constructs, so lookup is a single === check.
-			--   * Only recurses into entries that look like directories
-			--     (no extension in the last component). Roblox scripts
-			--     we write always have .lua; misidentifying a
-			--     dot-containing folder name at worst means we miss
-			--     resume for its contents, which is a graceful
-			--     degradation, not a correctness bug.
-
-			local existing = {}
-			local storedCount = 0
-
-			-- Precompute the position where outputRoot appears in
-			-- absolute paths, if applicable. We do this once per
-			-- entry rather than per-variant.
-			local rootEscaped = string.gsub(outputRoot,
-				"([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
-
-			local function canonical(p)
-				local norm = string.gsub(p, "\\", "/")
-				local idx = string.find(norm, rootEscaped, 1, false)
-				if idx then
-					return string.sub(norm, idx)
-				end
-				return norm
-			end
-
-			local function looksLikeFile(p)
-				-- Extract the last component; check for a dot not at
-				-- the start (dotfiles are treated as folders here,
-				-- which is fine since we don't produce any).
-				local last = string.match(p, "[^/\\]+$") or ""
-				return string.find(last, "[^.]%.", 1, false) ~= nil
-			end
-
-			local function scan(dir)
-				local ok, entries = pcall(listfiles, dir)
-				if not ok or type(entries) ~= "table" then return end
-				for i = 1, #entries do
-					local p = entries[i]
-					local c = canonical(p)
-					if not existing[c] then
-						existing[c] = true
-						storedCount = storedCount + 1
-					end
-					if not looksLikeFile(p) then
-						-- Yield periodically during the scan so the
-						-- executor watchdog doesn't kill us on huge
-						-- trees. Once per dir listing is cheap.
-						if storedCount % 1000 == 0 then
-							Lib.FastWait()
-						end
-						scan(p)
-					end
-				end
-			end
-			scan(outputRoot)
-
-			local function setProbe(path)
-				return existing[canonical(path)] == true
-			end
-			return setProbe, "listfiles-set(" .. storedCount .. ")"
-		end
-
-		local readfile = env.readfile or probeGlobal({ "readfile" })
-		if type(readfile) == "function" then
-			local function readfileProbe(path)
-				local ok = pcall(readfile, path)
-				return ok
-			end
-			return readfileProbe, "readfile-probe"
-		end
-
-		return nil, nil
-	end
-
-	local function tryGetNilInstances()
-		local fn = env.getnilinstances or probeGlobal({
-			"getnilinstances", "get_nil_instances" })
-		if type(fn) == "function" then
-			local ok, res = pcall(fn)
-			if ok and type(res) == "table" then return res end
-		end
-		return nil
-	end
-
-	-------------------------------------------------------------------
-	-- Folder creation with memoization
-	-------------------------------------------------------------------
-
-	local createdFolders
-
-	local function ensureFolder(path)
-		if createdFolders[path] then return end
-		local parent = string.match(path, "^(.*)/[^/]+$")
-		if parent and parent ~= "" and not createdFolders[parent] then
-			ensureFolder(parent)
-		end
-		pcall(env.makefolder, path)
-		createdFolders[path] = true
-	end
-
-	-------------------------------------------------------------------
-	-- Safe operations (top-level funcs so pcall captures stable
-	-- upvalues and doesn't allocate a new closure per call)
-	-------------------------------------------------------------------
-
-	local function _readIndex(inst, prop) return inst[prop] end
-	local function _getFullName(inst) return inst:GetFullName() end
-	local function _getSource(inst) return inst.Source end
-	local function _getDescendants(inst) return inst:GetDescendants() end
-
-	local function safeGet(inst, prop)
-		local ok, val = pcall(_readIndex, inst, prop)
-		if ok then return val end
-		return nil
-	end
-
-	-------------------------------------------------------------------
-	-- Checkpoint + skip-list
-	--
-	-- Delta's decompiler occasionally segfaults on specific scripts
-	-- (obfuscators, certain bytecode patterns). The SDK pcall can't
-	-- catch C-level crashes, so the entire dump dies when it hits
-	-- one bad script. To recover:
-	--
-	-- 1. Before calling decompile() on a script, write its path to
-	--    <root>/.current.txt. If we crash, this tells us which
-	--    script killed us.
-	--
-	-- 2. On the next run's startup, read <root>/.current.txt. If it
-	--    has a value, that script was mid-decompile when we died —
-	--    add it to <root>/.skiplist.txt so future runs never try it
-	--    again.
-	--
-	-- 3. <root>/.skiplist.txt is read on startup into a set; any
-	--    script whose full name is in the set is skipped before
-	--    we even try to decompile it.
-	--
-	-- The user can also manually edit .skiplist.txt to add scripts
-	-- they know are problematic.
-	-------------------------------------------------------------------
-
-	local function checkpointPath(rootDir) return rootDir .. "/.current.txt" end
-	local function skiplistPath(rootDir)   return rootDir .. "/.skiplist.txt" end
-
-	local function writeCheckpoint(rootDir, fullName)
-		pcall(env.writefile, checkpointPath(rootDir), fullName or "")
-	end
-
-	local function clearCheckpoint(rootDir)
-		pcall(env.writefile, checkpointPath(rootDir), "")
-	end
-
-	local function readCheckpoint(rootDir)
-		local readfile = env.readfile
-		if type(readfile) ~= "function" then return nil end
-		local ok, content = pcall(readfile, checkpointPath(rootDir))
-		if ok and type(content) == "string" and content ~= "" then
-			return content
-		end
-		return nil
-	end
-
-	local function loadSkipList(rootDir)
-		local set = {}
-		local readfile = env.readfile
-		if type(readfile) ~= "function" then return set end
-		local ok, content = pcall(readfile, skiplistPath(rootDir))
-		if not ok or type(content) ~= "string" then return set end
-		for line in string.gmatch(content, "[^\r\n]+") do
-			if line ~= "" then set[line] = true end
-		end
-		return set
-	end
-
-	local function appendSkipList(rootDir, fullName)
-		if not fullName or fullName == "" then return end
-		-- Use appendfile if available so we don't have to round-trip
-		-- the whole file. Fall back to read-modify-write otherwise.
-		if type(env.appendfile) == "function" then
-			pcall(env.appendfile, skiplistPath(rootDir), fullName .. "\n")
-			return
-		end
-		local readfile = env.readfile
-		local existing = ""
-		if type(readfile) == "function" then
-			local ok, content = pcall(readfile, skiplistPath(rootDir))
-			if ok and type(content) == "string" then existing = content end
-		end
-		pcall(env.writefile, skiplistPath(rootDir), existing .. fullName .. "\n")
-	end
-
-	local function fullNameToPath(fullName, rootDir)
-		-- Split on "." but treat consecutive dots as empty components.
-		local components = {}
-		for part in string.gmatch(fullName, "[^%.]+") do
-			components[#components + 1] = sanitizeComponent(part)
-		end
-		if #components == 0 then
-			components[1] = "_unnamed"
-		end
-
-		-- Last component becomes the filename stem; everything before
-		-- is the folder chain.
-		local stem = components[#components]
-		components[#components] = nil
-
-		local folderPath
-		if #components == 0 then
-			folderPath = rootDir
-		else
-			folderPath = rootDir .. "/" .. table.concat(components, "/")
-		end
-		return folderPath, stem
-	end
-
-	-------------------------------------------------------------------
-	-- Script source extraction
-	-------------------------------------------------------------------
-
-	local function extractScriptSource(inst, decompile)
-		local okSrc, src = pcall(_getSource, inst)
-		if okSrc and type(src) == "string" and src ~= "" then
-			return src, "source"
-		end
-		if decompile then
-			local okDec, decSrc = pcall(decompile, inst)
-			if okDec and type(decSrc) == "string" and decSrc ~= "" then
-				return decSrc, "decompile"
-			end
-			if not okDec then
-				return "-- Dex Dumper: decompile() errored: "
-					.. tostring(decSrc), "error"
-			end
-		end
-		return "-- Dex Dumper: no source available", "unavailable"
-	end
-
-	-------------------------------------------------------------------
-	-- Logging
-	-------------------------------------------------------------------
-
-	local function renderLog()
-		if not (guiElems and guiElems.LogLabel) then return end
-		guiElems.LogLabel.Text = table.concat(logLines, "\n")
-	end
-
-	local function log(msg)
-		logLines[#logLines + 1] = tostring(msg)
-		if #logLines > MAX_LOG_LINES then
-			table.remove(logLines, 1)
-		end
-		renderLog()
-	end
-
-	local function updateStatus()
-		if not (guiElems and guiElems.StatusLabel) then return end
-		guiElems.StatusLabel.Text = string.format(
-			"Scripts: %d/%d  Skipped: %d  Errors: %d",
-			stats.written, stats.total,
-			stats.skipped, stats.errors
-		)
-	end
-
-	-------------------------------------------------------------------
-	-- Single-script write
-	-------------------------------------------------------------------
-
-	local function writeScript(inst, rootDir, decompile, isFile, skipExisting)
-		local okFull, fullName = pcall(_getFullName, inst)
-		if not okFull or type(fullName) ~= "string" then
-			stats.errors = stats.errors + 1
-			return
-		end
-
-		local folderPath, stem = fullNameToPath(fullName, rootDir)
-		local scriptPath = folderPath .. "/" .. stem .. ".lua"
-
-		-- Resume fast-path: check existence before doing any real work.
-		if skipExisting and isFile then
-			local ok, exists = pcall(isFile, scriptPath)
-			if ok and exists then
-				stats.skipped = stats.skipped + 1
-				return
-			end
-		end
-
-		ensureFolder(folderPath)
-
-		-- Checkpoint: record which script we're about to decompile.
-		-- If the decompiler segfaults, this file tells us which one
-		-- was the culprit on the next startup.
-		writeCheckpoint(rootDir, fullName)
-
-		local className = safeGet(inst, "ClassName") or "Script"
-		local source, kind = extractScriptSource(inst, decompile)
-		local header = "-- " .. className .. " | kind: " .. kind
-			.. "\n-- " .. fullName .. "\n\n"
-
-		local writeOk = pcall(env.writefile, scriptPath, header .. source)
-		if writeOk then
-			stats.written = stats.written + 1
-		else
-			stats.errors = stats.errors + 1
-		end
-
-		-- Clear checkpoint: we survived the decompile, this script
-		-- is fine. (Only cleared on successful completion of the
-		-- whole writeScript — any crash leaves the checkpoint intact.)
-		clearCheckpoint(rootDir)
-		-- source dropped at function return
-	end
-
-	-------------------------------------------------------------------
-	-- Collection: all scripts via GetDescendants
-	-------------------------------------------------------------------
-
-	-- Helper: does a full name match any pattern in the list?
-	local function matchesAny(fullName, patterns)
-		for i = 1, #patterns do
-			if string.find(fullName, patterns[i]) then
-				return true
-			end
-		end
-		return false
-	end
-
-	local function collectScripts(skipSet)
-		-- Single C++ call to grab EVERYTHING parented under game.
-		local all
-		do
-			local ok, result = pcall(_getDescendants, game)
-			if not ok or type(result) ~= "table" then
-				log("ERROR: game:GetDescendants() failed.")
-				return {}
-			end
-			all = result
-		end
-
-		log(string.format("game:GetDescendants() -> %d instances", #all))
-
-		local filterCoreUI = options.FilterCoreUI
-		local filterLibs   = options.FilterLibs
-		local skipLarge    = options.SkipLargeScripts
-
-		local scripts = {}
-		local skippedCore, skippedLib, skippedLarge, skippedListed = 0, 0, 0, 0
-
-		local function consider(inst)
-			local cn = safeGet(inst, "ClassName")
-			if not (cn and SCRIPT_CLASSES[cn]) then return end
-
-			local okFull, fullName = pcall(_getFullName, inst)
-			if not okFull or type(fullName) ~= "string" then return end
-
-			if skipSet and skipSet[fullName] then
-				skippedListed = skippedListed + 1
-				return
-			end
-			if filterCoreUI and matchesAny(fullName, CORE_UI_PATTERNS) then
-				skippedCore = skippedCore + 1
-				return
-			end
-			if filterLibs and matchesAny(fullName, LIB_PATTERNS) then
-				skippedLib = skippedLib + 1
-				return
-			end
-			if skipLarge then
-				-- Checking source size requires reading .Source which
-				-- may itself be locked or expensive. Only do this for
-				-- LocalScripts/ModuleScripts where .Source is
-				-- typically readable at the bytecode level.
-				local src = safeGet(inst, "Source")
-				if type(src) == "string" and #src > MAX_SCRIPT_BYTES then
-					skippedLarge = skippedLarge + 1
-					return
-				end
-			end
-
-			scripts[#scripts + 1] = inst
-		end
-
-		for i = 1, #all do
-			consider(all[i])
-		end
-
-		log(string.format("Scripts found: %d", #scripts))
-		if skippedCore > 0 then
-			log(string.format("  filtered: CoreUI=%d", skippedCore))
-		end
-		if skippedLib > 0 then
-			log(string.format("  filtered: Libs=%d", skippedLib))
-		end
-		if skippedLarge > 0 then
-			log(string.format("  filtered: large=%d", skippedLarge))
-		end
-		if skippedListed > 0 then
-			log(string.format("  filtered: skiplist=%d", skippedListed))
-		end
-
-		-- Nil-parented scripts.
-		if options.IncludeNil then
-			local nilRoots = tryGetNilInstances()
-			if nilRoots then
-				local before = #scripts
-				for i = 1, #nilRoots do
-					local root = nilRoots[i]
-					if root and root ~= game then
-						consider(root)
-						local ok, descs = pcall(_getDescendants, root)
-						if ok and type(descs) == "table" then
-							for j = 1, #descs do
-								consider(descs[j])
-							end
-						end
-					end
-				end
-				log(string.format("Nil-parented scripts: %d", #scripts - before))
-			else
-				log("getnilinstances() unavailable")
-			end
-		end
-
-		return scripts
-	end
-
-	-------------------------------------------------------------------
-	-- Entry point
-	-------------------------------------------------------------------
-
-	local function runDump()
-		if running then return end
-		if not hasFilesystemAPI() then
-			log("ERROR: Executor lacks writefile/makefolder. Cannot dump.")
-			return
-		end
-
-		running = true
-		cancelRequested = false
-		createdFolders = {}
-		stats = { written = 0, total = 0, skipped = 0, errors = 0 }
-		logLines = {}
-		renderLog()
-
-		if guiElems and guiElems.StartButton then
-			guiElems.StartButton.Text = "Cancel Dump"
-		end
-
-		local root = string.format("dex/dumps/%s", tostring(game.PlaceId))
-		ensureFolder("dex")
-		ensureFolder("dex/dumps")
-		ensureFolder(root)
-
-		local skipExisting = options.SkipExisting
-		local decompile = resolveDecompiler()
-		local isFile, isFileMethod = resolveIsFile(root)
-
-		-- Check for a leftover checkpoint from a previous crashed run.
-		-- If present, that script crashed the decompiler — add it to
-		-- the permanent skiplist so we never try it again.
-		local priorCheckpoint = readCheckpoint(root)
-		if priorCheckpoint then
-			log("Prior run died on: " .. priorCheckpoint)
-			log("Adding to skiplist permanently.")
-			appendSkipList(root, priorCheckpoint)
-			clearCheckpoint(root)
-		end
-
-		local skipSet = loadSkipList(root)
-		local skipSetCount = 0
-		for _ in pairs(skipSet) do skipSetCount = skipSetCount + 1 end
-
-		log("Dump started.")
-		log("Output: " .. root)
-		log(string.format("skipExisting=%s  isfile=%s  decompile=%s  skiplist=%d",
-			tostring(skipExisting),
-			isFile and isFileMethod or "MISSING",
-			decompile and "available" or "MISSING",
-			skipSetCount))
-
-		if skipExisting and not isFile then
-			log("WARN: resume disabled (no readfile or isfile); will re-write all")
-		end
-
-		-- Collect all scripts up-front, applying filters and skiplist.
-		local scripts = collectScripts(skipSet)
-		stats.total = #scripts
-		updateStatus()
-		Lib.FastWait()
-
-		if #scripts == 0 then
-			log("No scripts to dump.")
-			running = false
-			if guiElems and guiElems.StartButton then
-				guiElems.StartButton.Text = "Start Dump"
-			end
-			return
-		end
-
-		-- Write them.
-		for i = 1, #scripts do
-			if cancelRequested then break end
-
-			writeScript(scripts[i], root, decompile, isFile, skipExisting)
-
-			-- Yield and update UI periodically. We yield per script
-			-- (not per instance) since script count is ~5x smaller
-			-- than instance count and each write is heavier.
-			local processed = stats.written + stats.skipped + stats.errors
-			if processed % YIELD_EVERY_SCRIPT == 0 then
-				if processed % UI_UPDATE_EVERY == 0 then
-					updateStatus()
-				end
-				Lib.FastWait()
-			end
-		end
-
-		updateStatus()
-		if cancelRequested then
-			log("Cancelled.")
-		else
-			log(string.format("Done. Wrote %d, skipped %d, errors %d.",
-				stats.written, stats.skipped, stats.errors))
-		end
-
-		running = false
-		if guiElems and guiElems.StartButton then
-			guiElems.StartButton.Text = "Start Dump"
-		end
-	end
-
-	-------------------------------------------------------------------
-	-- UI
-	-------------------------------------------------------------------
-
-	local function makeCheckbox(parent, y, labelText, defaultValue, onChange)
-		local holder = Instance.new("Frame")
-		holder.BackgroundTransparency = 1
-		holder.Position = UDim2.new(0, 8, 0, y)
-		holder.Size = UDim2.new(1, -16, 0, 20)
-		holder.Parent = parent
-
-		local box = Instance.new("TextButton")
-		box.Size = UDim2.new(0, 16, 0, 16)
-		box.Position = UDim2.new(0, 0, 0, 2)
-		box.BackgroundColor3 = Settings.Theme.TextBox
-		box.BorderColor3 = Settings.Theme.Outline3
-		box.Text = defaultValue and "X" or ""
-		box.TextColor3 = Settings.Theme.Text
-		box.Font = Enum.Font.SourceSansBold
-		box.TextSize = 14
-		box.AutoButtonColor = true
-		box.Parent = holder
-
-		local lbl = Instance.new("TextLabel")
-		lbl.BackgroundTransparency = 1
-		lbl.Position = UDim2.new(0, 22, 0, 0)
-		lbl.Size = UDim2.new(1, -22, 1, 0)
-		lbl.Font = Enum.Font.SourceSans
-		lbl.TextSize = 14
-		lbl.TextColor3 = Settings.Theme.Text
-		lbl.TextXAlignment = Enum.TextXAlignment.Left
-		lbl.Text = labelText
-		lbl.Parent = holder
-
-		local state = defaultValue
-		box.MouseButton1Click:Connect(function()
-			state = not state
-			box.Text = state and "X" or ""
-			if onChange then onChange(state) end
-		end)
-
-		return holder
-	end
-
-	Dumper.Init = function()
-		window = Lib.Window.new()
-		window:SetTitle("Game Dumper")
-		window:Resize(520, 460)
-		Dumper.Window = window
-
-		local content = window.GuiElems.Content
-		guiElems = {}
-
-		local desc = Instance.new("TextLabel")
-		desc.BackgroundTransparency = 1
-		desc.Position = UDim2.new(0, 8, 0, 6)
-		desc.Size = UDim2.new(1, -16, 0, 34)
-		desc.Font = Enum.Font.SourceSans
-		desc.TextSize = 13
-		desc.TextColor3 = Settings.Theme.Text
-		desc.TextXAlignment = Enum.TextXAlignment.Left
-		desc.TextYAlignment = Enum.TextYAlignment.Top
-		desc.TextWrapped = true
-		desc.Text = "Dumps scripts to dex/dumps/<PlaceId>/. Run multiple times to resume. "
-			.. "Filters strip Roblox built-ins and well-known libs by default."
-		desc.Parent = content
-
-		makeCheckbox(content, 44, "Skip existing files (resume)",
-			options.SkipExisting, function(v) options.SkipExisting = v end)
-		makeCheckbox(content, 66, "Include nil-parented scripts",
-			options.IncludeNil, function(v) options.IncludeNil = v end)
-		makeCheckbox(content, 88, "Filter Roblox CoreGui / chat / built-ins",
-			options.FilterCoreUI, function(v) options.FilterCoreUI = v end)
-		makeCheckbox(content, 110, "Filter common libraries (Roact, Promise, etc.)",
-			options.FilterLibs, function(v) options.FilterLibs = v end)
-		makeCheckbox(content, 132, "Skip very large scripts (likely obfuscated)",
-			options.SkipLargeScripts, function(v) options.SkipLargeScripts = v end)
-
-		local status = Instance.new("TextLabel")
-		status.BackgroundTransparency = 1
-		status.Position = UDim2.new(0, 8, 0, 162)
-		status.Size = UDim2.new(1, -16, 0, 20)
-		status.Font = Enum.Font.Code
-		status.TextSize = 13
-		status.TextColor3 = Settings.Theme.Text
-		status.TextXAlignment = Enum.TextXAlignment.Left
-		status.Text = "Idle."
-		status.Parent = content
-		guiElems.StatusLabel = status
-
-		local logScroll = Instance.new("ScrollingFrame")
-		logScroll.Position = UDim2.new(0, 8, 0, 186)
-		logScroll.Size = UDim2.new(1, -16, 1, -224)
-		logScroll.BackgroundColor3 = Settings.Theme.TextBox
-		logScroll.BorderColor3 = Settings.Theme.Outline3
-		logScroll.BorderSizePixel = 1
-		logScroll.ScrollBarThickness = 6
-		logScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
-		logScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
-		logScroll.Parent = content
-
-		local logLabel = Instance.new("TextLabel")
-		logLabel.BackgroundTransparency = 1
-		logLabel.Position = UDim2.new(0, 4, 0, 2)
-		logLabel.Size = UDim2.new(1, -8, 0, 0)
-		logLabel.AutomaticSize = Enum.AutomaticSize.Y
-		logLabel.Font = Enum.Font.Code
-		logLabel.TextSize = 12
-		logLabel.TextColor3 = Settings.Theme.Text
-		logLabel.TextXAlignment = Enum.TextXAlignment.Left
-		logLabel.TextYAlignment = Enum.TextYAlignment.Top
-		logLabel.TextWrapped = true
-		logLabel.Text = "Press Start Dump to begin."
-		logLabel.Parent = logScroll
-		guiElems.LogLabel = logLabel
-
-		local startBtn = Instance.new("TextButton")
-		startBtn.Position = UDim2.new(0, 8, 1, -32)
-		startBtn.Size = UDim2.new(0, 160, 0, 24)
-		startBtn.BackgroundColor3 = Settings.Theme.Button
-		startBtn.BorderColor3 = Settings.Theme.Outline2
-		startBtn.TextColor3 = Settings.Theme.Text
-		startBtn.Font = Enum.Font.SourceSans
-		startBtn.TextSize = 14
-		startBtn.Text = "Start Dump"
-		startBtn.Parent = content
-		guiElems.StartButton = startBtn
-
-		startBtn.MouseButton1Click:Connect(function()
-			if running then
-				cancelRequested = true
-				log("Cancel requested...")
-				return
-			end
-			coroutine.wrap(runDump)()
-		end)
-
-		local pathBtn = Instance.new("TextButton")
-		pathBtn.Position = UDim2.new(0, 176, 1, -32)
-		pathBtn.Size = UDim2.new(0, 160, 0, 24)
-		pathBtn.BackgroundColor3 = Settings.Theme.Button
-		pathBtn.BorderColor3 = Settings.Theme.Outline2
-		pathBtn.TextColor3 = Settings.Theme.Text
-		pathBtn.Font = Enum.Font.SourceSans
-		pathBtn.TextSize = 14
-		pathBtn.Text = "Copy Path"
-		pathBtn.Parent = content
-
-		pathBtn.MouseButton1Click:Connect(function()
-			local path = string.format("dex/dumps/%s", tostring(game.PlaceId))
-			if type(env.setclipboard) == "function" then
-				pcall(env.setclipboard, path)
-				log("Copied: " .. path)
-			else
-				log("Path: " .. path)
-			end
-		end)
-	end
-
-	Dumper.Dump = function()
-		if running then return false, "already running" end
-		coroutine.wrap(runDump)()
-		return true
-	end
-
-	return Dumper
-end
-
-if gethsfuncs then
-	_G.moduleData = { InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main }
-else
-	return { InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main }
-end
-
-end,
 ["Properties"] = function()
 --[[
 	Properties App Module
@@ -5087,6 +4138,883 @@ else
 	return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 end
 end,
+["ScriptViewer"] = function()
+--[[
+	Script Viewer App Module
+	
+	A script viewer that is basically a notepad
+]]
+
+-- Common Locals
+local Main,Lib,Apps,Settings -- Main Containers
+local Explorer, Properties, ScriptViewer, Notebook -- Major Apps
+local API,RMD,env,service,plr,create,createSimple -- Main Locals
+
+local function initDeps(data)
+	Main = data.Main
+	Lib = data.Lib
+	Apps = data.Apps
+	Settings = data.Settings
+
+	API = data.API
+	RMD = data.RMD
+	env = data.env
+	service = data.service
+	plr = data.plr
+	create = data.create
+	createSimple = data.createSimple
+end
+
+local function initAfterMain()
+	Explorer = Apps.Explorer
+	Properties = Apps.Properties
+	ScriptViewer = Apps.ScriptViewer
+	Notebook = Apps.Notebook
+end
+
+local function main()
+	local ScriptViewer = {}
+
+	local window,codeFrame
+
+	ScriptViewer.ViewScript = function(scr)
+		local s,source = pcall(env.decompile or function() end,scr)
+		if not s or not source then
+			source = "local test = 5\n\nlocal c = test + tick()\ngame.Workspace.Board:Destroy()\nstring.match('wow\\'f',\"yes\",3.4e-5,true)\ngame. Workspace.Wow\nfunction bar() print(54) end\n string . match() string 4 .match()"
+			source = source.."\n"..[==[
+			function a.sad() end
+			function a.b:sad() end
+			function 4.why() end
+			function a b() end
+			function string.match() end
+			function string.match.why() end
+			function local() end
+			function local.thing() end
+			string  . "sad" match
+			().magnitude = 3
+			a..b
+			a..b()
+			a...b
+			a...b()
+			a....b
+			a....b()
+			string..match()
+			string....match()
+			]==]
+		end
+
+		codeFrame:SetText(source)
+		window:Show()
+	end
+
+	ScriptViewer.Init = function()
+		window = Lib.Window.new()
+		window:SetTitle("Script Viewer")
+		window:Resize(500,400)
+		ScriptViewer.Window = window
+
+		codeFrame = Lib.CodeFrame.new()
+		codeFrame.Frame.Position = UDim2.new(0,0,0,20)
+		codeFrame.Frame.Size = UDim2.new(1,0,1,-20)
+		codeFrame.Frame.Parent = window.GuiElems.Content
+
+		-- TODO: REMOVE AND MAKE BETTER
+		local copy = Instance.new("TextButton",window.GuiElems.Content)
+		copy.BackgroundTransparency = 1
+		copy.Size = UDim2.new(0.5,0,0,20)
+		copy.Text = "Copy to Clipboard"
+		copy.TextColor3 = Color3.new(1,1,1)
+
+		copy.MouseButton1Click:Connect(function()
+			local source = codeFrame:GetText()
+			setclipboard(source)
+		end)
+
+		local save = Instance.new("TextButton",window.GuiElems.Content)
+		save.BackgroundTransparency = 1
+		save.Position = UDim2.new(0.5,0,0,0)
+		save.Size = UDim2.new(0.5,0,0,20)
+		save.Text = "Save to File"
+		save.TextColor3 = Color3.new(1,1,1)
+
+		save.MouseButton1Click:Connect(function()
+			local source = codeFrame:GetText()
+			local filename = "Place_"..game.PlaceId.."_Script_"..os.time()..".txt"
+
+			writefile(filename,source)
+			if movefileas then -- TODO: USE ENV
+				movefileas(filename,".txt")
+			end
+		end)
+	end
+
+	return ScriptViewer
+end
+
+-- TODO: Remove when open source
+if gethsfuncs then
+	_G.moduleData = {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
+else
+	return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
+end
+end,
+["GameDumper"] = function()
+--[[
+	Game Dumper App Module
+
+	Dumps the current game to the executor's local filesystem.
+
+	Tries to be smart about what it dumps:
+		- Skips Roblox-internal services (CoreGui, CorePackages, internal services, etc.)
+		- Skips other players' PlayerGuis / Backpacks / Character internals
+		- Skips Roblox's default vanilla character scripts (Animate, Health, Sound, RbxCharacterSounds, etc.)
+		- Skips empty containers it just skipped into
+
+	Two modes:
+		FULL   - Uses executor's saveinstance() if available, dumps everything as one .rbxlx
+		         (with whitelist passed when supported). Falls back to MANUAL if not present.
+		MANUAL - Walks the tree itself, decompiles every Script/LocalScript/ModuleScript,
+		         writes them as .lua under a mirrored folder structure, plus a tree.json
+		         describing the rest of the instances.
+
+	Files end up under: dex/dumps/<PlaceId>_<UnixTime>/
+]]
+
+-- Common Locals
+local Main,Lib,Apps,Settings
+local Explorer, Properties, ScriptViewer, Notebook
+local API,RMD,env,service,plr,create,createSimple
+
+local function initDeps(data)
+	Main = data.Main
+	Lib = data.Lib
+	Apps = data.Apps
+	Settings = data.Settings
+
+	API = data.API
+	RMD = data.RMD
+	env = data.env
+	service = data.service
+	plr = data.plr
+	create = data.create
+	createSimple = data.createSimple
+end
+
+local function initAfterMain()
+	Explorer = Apps.Explorer
+	Properties = Apps.Properties
+	ScriptViewer = Apps.ScriptViewer
+	Notebook = Apps.Notebook
+end
+
+local function main()
+	local GameDumper = {}
+
+	-- ============================================================
+	--  FILTER CONFIG
+	-- ============================================================
+
+	-- Services we never bother dumping. These are either Roblox-internal,
+	-- inaccessible, or contain nothing of game-content value.
+	local skippedServices = {
+		CoreGui                              = true,
+		CorePackages                         = true,
+		CoreScriptDebuggingManagerV2         = true,
+		GuiService                           = true,
+		KeyboardService                      = true,
+		MouseService                         = true,
+		HapticService                        = true,
+		UserInputService                     = true,
+		ContextActionService                 = true,
+		VRService                            = true,
+		StudioService                        = true,
+		ScriptService                        = true,
+		LogService                           = true,
+		LuaSettingsService                   = true,
+		LuaWebService                        = true,
+		HttpRbxApiService                    = true,
+		ContentProvider                      = true,
+		StatsService                         = true,
+		Stats                                = true,
+		BadgeService                         = true,
+		GamePassService                      = true,
+		MarketplaceService                   = true,
+		FriendService                        = true,
+		AnalyticsService                     = true,
+		RbxAnalyticsService                  = true,
+		AvatarEditorService                  = true,
+		AssetService                         = true,
+		AdService                            = true,
+		AdvertisingService                   = true,
+		AdPortalService                      = true,
+		FlagStandService                     = true,
+		PlatformService                      = true,
+		PluginGuiService                     = true,
+		PluginDebugService                   = true,
+		ScriptContext                        = true,
+		TouchInputService                    = true,
+		TweenService                         = true,
+		Selection                            = true,
+		ChangeHistoryService                 = true,
+		CookiesService                       = true,
+		CSGDictionaryService                 = true,
+		NonReplicatedCSGDictionaryService    = true,
+		TimerService                         = true,
+		RunService                           = true,
+		PathfindingService                   = true,
+		PhysicsService                       = true,
+		ProcessInstancePhysicsService        = true,
+		RenderingTest                        = true,
+		PolicyService                        = true,
+		LocalizationService                  = true,
+		TestService                          = false, -- might have game devs leaving stuff here, keep it
+		HttpService                          = true,
+		DataStoreService                     = true,
+		MessagingService                     = true,
+		MemoryStoreService                   = true,
+		TeleportService                      = true,
+		PointsService                        = true,
+		NotificationService                  = true,
+		RobloxReplicatedStorage              = true,
+		ReplicatedScriptService              = true,
+		PermissionsService                   = true,
+		HeartbeatService                     = true,
+		NetworkClient                        = true,
+		NetworkServer                        = true,
+		BrowserService                       = true,
+		ProximityPromptService               = true,
+		VoiceChatService                     = true,
+		CaptureService                       = true,
+		ScreenshotHud                        = true,
+		ServerStorage                        = false, -- inaccessible from client but harmless if listed
+	}
+
+	-- Other players' per-player containers we skip (we keep our own, plus
+	-- non-replicating game scripts the dev parented there).
+	local perPlayerSkippedChildren = {
+		Backpack             = true,
+		PlayerGui            = true,
+		StarterGear          = true,
+		PlayerScripts        = true,
+	}
+
+	-- Roblox's default vanilla character scripts. If found inside a player's
+	-- Character (or in StarterPlayer / StarterCharacterScripts unchanged),
+	-- they're noise.
+	local defaultCharacterScripts = {
+		Animate              = true,
+		AnimateSaves         = true,
+		Health               = true,
+		Sound                = true,
+		RbxCharacterSounds   = true,
+	}
+
+	-- Default StarterPlayerScripts that ship with every place
+	local defaultStarterPlayerScripts = {
+		PlayerScriptsLoader  = true,
+		PlayerModule         = true, -- This is the camera/control module - usually default, sometimes edited
+		ChatScript           = true,
+		RbxCharacterSounds   = true,
+	}
+
+	-- Names of CoreGui-style stuff that occasionally lives elsewhere
+	local junkNames = {
+		["Chat"]             = false, -- can be a game's custom chat or roblox default; keep it
+		["RobloxLocPlayerHumanoidDescription"] = true,
+	}
+
+	-- Class names we don't bother saving on their own (purely runtime / view)
+	local skippedClasses = {
+		Camera               = true,
+		Terrain              = false, -- terrain itself we keep, but its giant binary voxels we don't try to manual-dump
+		PackageLink          = true,
+	}
+
+	-- ============================================================
+	--  STATE
+	-- ============================================================
+
+	local window
+	local statusLabel, progressBar, progressFill
+	local startButton, openFolderButton, modeDropdown
+	local logBox
+	local optionsFrame
+	local currentMode = "FULL"  -- "FULL" or "MANUAL"
+	local options = {
+		IncludeOtherPlayers     = false,
+		IncludeDefaultScripts   = false,
+		DecompileScripts        = true,
+		IncludeNilInstances     = true,
+	}
+	local dumping = false
+	local dumpStats
+
+	-- ============================================================
+	--  HELPERS
+	-- ============================================================
+
+	local function log(msg)
+		if logBox and logBox.Parent then
+			logBox.Text = logBox.Text .. tostring(msg) .. "\n"
+			-- Auto-scroll
+			pcall(function()
+				logBox.CanvasPosition = Vector2.new(0, math.huge)
+			end)
+		end
+		print("[GameDumper]", msg)
+	end
+
+	local function setStatus(text)
+		if statusLabel then statusLabel.Text = text end
+	end
+
+	local function setProgress(frac)
+		if progressFill then
+			progressFill.Size = UDim2.new(math.clamp(frac,0,1), 0, 1, 0)
+		end
+	end
+
+	local function safeGetName(inst)
+		local ok,n = pcall(function() return inst.Name end)
+		if ok then return n end
+		return "<unnamed>"
+	end
+
+	local function safeGetClass(inst)
+		local ok,c = pcall(function() return inst.ClassName end)
+		if ok then return c end
+		return "<unknown>"
+	end
+
+	-- Sanitize for use as a filesystem name
+	local function sanitize(name)
+		name = tostring(name or "")
+		name = name:gsub("[%c]", "_")
+		name = name:gsub('[\\/:*?"<>|]', "_")
+		if name == "" then name = "_" end
+		if #name > 100 then name = name:sub(1,100) end
+		return name
+	end
+
+	-- Build a unique full path within a folder set, avoiding name collisions
+	local function uniqueChildName(usedSet, base)
+		local name = base
+		local i = 2
+		while usedSet[name] do
+			name = base .. "_" .. i
+			i = i + 1
+		end
+		usedSet[name] = true
+		return name
+	end
+
+	-- Does this instance look like an unmodified Roblox-default thing we should skip?
+	local function isDefaultRobloxJunk(inst, parentChain)
+		local name  = safeGetName(inst)
+		local class = safeGetClass(inst)
+
+		-- Default character scripts
+		if defaultCharacterScripts[name] and (class == "LocalScript" or class == "Script" or class == "ModuleScript") then
+			-- Only filter when they live in a Character / StarterCharacterScripts
+			for _,ancestor in ipairs(parentChain) do
+				local aname = safeGetName(ancestor)
+				if aname == "StarterCharacterScripts" or aname == "StarterPlayerScripts" then
+					return true
+				end
+				-- A player's Character model
+				if ancestor:IsA("Model") and ancestor:FindFirstChildOfClass("Humanoid") then
+					return true
+				end
+			end
+		end
+
+		-- Default starter player scripts
+		if defaultStarterPlayerScripts[name] then
+			for _,ancestor in ipairs(parentChain) do
+				if safeGetName(ancestor) == "StarterPlayerScripts" then
+					return true
+				end
+			end
+		end
+
+		if junkNames[name] then return true end
+		if skippedClasses[class] then return true end
+
+		return false
+	end
+
+	-- Decide if we should descend / dump this instance at all
+	local function shouldInclude(inst, parentChain)
+		if not inst then return false end
+
+		-- Top-level service filter
+		local class = safeGetClass(inst)
+		if inst.Parent == game and skippedServices[class] then
+			return false
+		end
+		if inst.Parent == game and skippedServices[safeGetName(inst)] then
+			return false
+		end
+
+		-- Per-player filter (Players.* children)
+		if #parentChain >= 2 then
+			local maybePlayer = parentChain[#parentChain]
+			if maybePlayer and maybePlayer:IsA("Player") then
+				if maybePlayer ~= plr and not options.IncludeOtherPlayers then
+					-- skip OTHER players' containers entirely
+					if perPlayerSkippedChildren[safeGetName(inst)] then
+						return false
+					end
+				end
+			end
+		end
+
+		-- Skip Roblox-default vanilla scripts unless user wants them
+		if not options.IncludeDefaultScripts and isDefaultRobloxJunk(inst, parentChain) then
+			return false
+		end
+
+		return true
+	end
+
+	-- ============================================================
+	--  MODE 1: saveinstance (executor-provided, ideal path)
+	-- ============================================================
+
+	local function dumpViaSaveInstance(outFolder)
+		if not env.saveinstance then
+			log("saveinstance() not available in this executor.")
+			return false
+		end
+
+		local filePath = outFolder .. "/game.rbxlx"
+		setStatus("Saving via saveinstance()...")
+		setProgress(0.5)
+
+		-- Build a service ignore list to pass through; many executors accept a table
+		-- here under various keys, so we just include the most common forms.
+		local ignoreList = {}
+		for name,skip in pairs(skippedServices) do
+			if skip then ignoreList[#ignoreList+1] = name end
+		end
+
+		local saveOpts = {
+			noscripts        = false,
+			scriptcache      = true,
+			IgnoreList       = ignoreList,
+			ignore           = ignoreList,
+			RemoveServices   = ignoreList,
+			-- decompile saved scripts when possible
+			decompile        = true,
+			DecompileScripts = options.DecompileScripts,
+			Decompile        = options.DecompileScripts,
+		}
+
+		local ok, err = pcall(function()
+			-- Different executors have different signatures. Try the rich one first,
+			-- fall back to the minimal one.
+			local s = pcall(env.saveinstance, filePath, saveOpts)
+			if not s then
+				env.saveinstance(filePath)
+			end
+		end)
+
+		if not ok then
+			log("saveinstance() failed: " .. tostring(err))
+			return false
+		end
+
+		setProgress(1)
+		log("Game saved to: " .. filePath)
+		return true
+	end
+
+	-- ============================================================
+	--  MODE 2: Manual walker
+	-- ============================================================
+
+	local function manualDump(outFolder)
+		setStatus("Walking game tree...")
+		setProgress(0)
+
+		dumpStats = { scripts = 0, instances = 0, skipped = 0, errors = 0 }
+
+		-- Top-level: iterate game's children, filter to services we care about
+		local roots = {}
+		for _,child in ipairs(game:GetChildren()) do
+			if shouldInclude(child, {game}) then
+				roots[#roots+1] = child
+			else
+				dumpStats.skipped = dumpStats.skipped + 1
+			end
+		end
+
+		-- Optional: nil instances (parented to nil, often hidden game data)
+		if options.IncludeNilInstances and env.getnilinstances then
+			local ok, nils = pcall(env.getnilinstances)
+			if ok and type(nils) == "table" then
+				for _,n in ipairs(nils) do
+					-- only dump scripts / scriptlike from nil; everything else is usually internal
+					local cls = safeGetClass(n)
+					if cls == "Script" or cls == "LocalScript" or cls == "ModuleScript" or cls == "Folder" or cls == "Model" then
+						roots[#roots+1] = n
+					end
+				end
+			end
+		end
+
+		-- Build a JSON-able tree as we go; also write each script as a file.
+		local function writeScript(scriptInst, fsPath)
+			local source
+			if options.DecompileScripts and env.decompile then
+				local ok, src = pcall(env.decompile, scriptInst)
+				if ok and src and src ~= "" then
+					source = src
+				end
+			end
+			if not source then
+				-- Try .Source directly (works for ModuleScripts on some executors)
+				local ok, src = pcall(function() return scriptInst.Source end)
+				if ok and type(src) == "string" and src ~= "" then
+					source = src
+				end
+			end
+			source = source or "-- (source unavailable)"
+
+			local ok, err = pcall(env.writefile, fsPath, source)
+			if ok then
+				dumpStats.scripts = dumpStats.scripts + 1
+			else
+				dumpStats.errors = dumpStats.errors + 1
+				log("Failed to write " .. fsPath .. ": " .. tostring(err))
+			end
+		end
+
+		-- Recursive walker
+		local function walk(inst, parentChain, fsParent, treeParent)
+			dumpStats.instances = dumpStats.instances + 1
+
+			local className = safeGetClass(inst)
+			local rawName   = safeGetName(inst)
+			local cleanName = sanitize(rawName)
+
+			-- Build node for tree.json
+			local node = {
+				name      = rawName,
+				class     = className,
+				children  = {},
+			}
+			treeParent[#treeParent+1] = node
+
+			-- Scripts -> dump source
+			if className == "Script" or className == "LocalScript" or className == "ModuleScript" then
+				local usedSet = fsParent._used
+				local fileBase = uniqueChildName(usedSet, cleanName)
+				local ext = (className == "LocalScript" and ".local.lua")
+					or (className == "ModuleScript" and ".module.lua")
+					or ".server.lua"
+				local fsPath = fsParent.path .. "/" .. fileBase .. ext
+				writeScript(inst, fsPath)
+				node.file = fileBase .. ext
+			end
+
+			-- Descend (only if it has children worth descending into)
+			local children
+			local ok = pcall(function() children = inst:GetChildren() end)
+			if not ok or not children then return end
+
+			if #children > 0 then
+				-- Only create a real folder on disk if there are kept children
+				local subFs
+				local kept = {}
+				local newChain = {}
+				for i = 1, #parentChain do newChain[i] = parentChain[i] end
+				newChain[#newChain+1] = inst
+
+				for _,c in ipairs(children) do
+					if shouldInclude(c, newChain) then
+						kept[#kept+1] = c
+					else
+						dumpStats.skipped = dumpStats.skipped + 1
+					end
+				end
+
+				if #kept > 0 then
+					local usedSet = fsParent._used
+					local folderName = uniqueChildName(usedSet, cleanName)
+					local folderPath = fsParent.path .. "/" .. folderName
+					pcall(env.makefolder, folderPath)
+					subFs = { path = folderPath, _used = {} }
+					node.folder = folderName
+
+					for _,c in ipairs(kept) do
+						walk(c, newChain, subFs, node.children)
+						-- Yield occasionally so we don't freeze the UI
+						if dumpStats.instances % 250 == 0 then
+							Lib.FastWait()
+							setStatus(string.format("Walked %d instances, %d scripts...", dumpStats.instances, dumpStats.scripts))
+						end
+					end
+				end
+			end
+		end
+
+		local rootFs = { path = outFolder, _used = {} }
+		local tree = { name = "game", class = "DataModel", children = {} }
+		local total = #roots
+
+		for i,root in ipairs(roots) do
+			setStatus(string.format("Dumping %s (%d/%d)...", safeGetName(root), i, total))
+			setProgress((i-1)/math.max(1,total))
+			walk(root, {game}, rootFs, tree.children)
+			setProgress(i/math.max(1,total))
+			Lib.FastWait()
+		end
+
+		-- Write the tree manifest
+		local treeJson
+		local ok = pcall(function()
+			treeJson = service.HttpService:JSONEncode(tree)
+		end)
+		if ok and treeJson then
+			pcall(env.writefile, outFolder .. "/tree.json", treeJson)
+		end
+
+		-- Write a summary
+		local summary = string.format(
+			"Game Dump Summary\n=================\nPlaceId:   %d\nJobId:     %s\nMode:      MANUAL\nTime:      %s\n\nInstances walked: %d\nScripts written:  %d\nSkipped:          %d\nErrors:           %d\n",
+			game.PlaceId,
+			tostring(game.JobId),
+			os.date("%Y-%m-%d %H:%M:%S"),
+			dumpStats.instances,
+			dumpStats.scripts,
+			dumpStats.skipped,
+			dumpStats.errors
+		)
+		pcall(env.writefile, outFolder .. "/summary.txt", summary)
+		log(summary)
+
+		return true
+	end
+
+	-- ============================================================
+	--  ORCHESTRATION
+	-- ============================================================
+
+	GameDumper.Dump = function()
+		if dumping then log("Already dumping...") return end
+		dumping = true
+
+		if not env.writefile or not env.makefolder then
+			log("Executor missing writefile/makefolder. Aborting.")
+			setStatus("Unsupported executor.")
+			dumping = false
+			return
+		end
+
+		-- Build output folder
+		local placeId = game.PlaceId
+		local stamp = os.time()
+		local outFolder = string.format("dex/dumps/%d_%d", placeId, stamp)
+		pcall(env.makefolder, "dex/dumps")
+		pcall(env.makefolder, outFolder)
+
+		log("Output: " .. outFolder)
+		log("Mode:   " .. currentMode)
+		setProgress(0)
+
+		local ok = false
+		if currentMode == "FULL" then
+			ok = dumpViaSaveInstance(outFolder)
+			if not ok then
+				log("Falling back to MANUAL mode...")
+				ok = manualDump(outFolder)
+			end
+		else
+			ok = manualDump(outFolder)
+		end
+
+		if ok then
+			setStatus("Done. Output: " .. outFolder)
+			setProgress(1)
+		else
+			setStatus("Dump failed.")
+		end
+
+		dumping = false
+	end
+
+	-- ============================================================
+	--  UI
+	-- ============================================================
+
+	GameDumper.Init = function()
+		window = Lib.Window.new()
+		window:SetTitle("Game Dumper")
+		window:Resize(420, 360)
+		GameDumper.Window = window
+
+		local content = window.GuiElems.Content
+		local theme = Settings.Theme
+
+		-- Status label
+		statusLabel = Instance.new("TextLabel", content)
+		statusLabel.BackgroundTransparency = 1
+		statusLabel.Position = UDim2.new(0, 8, 0, 8)
+		statusLabel.Size = UDim2.new(1, -16, 0, 20)
+		statusLabel.TextColor3 = theme.Text
+		statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+		statusLabel.Font = Enum.Font.SourceSans
+		statusLabel.TextSize = 14
+		statusLabel.Text = "Idle. Configure options below and click Dump."
+
+		-- Progress bar
+		progressBar = Instance.new("Frame", content)
+		progressBar.BackgroundColor3 = theme.Outline3
+		progressBar.BorderSizePixel = 0
+		progressBar.Position = UDim2.new(0, 8, 0, 32)
+		progressBar.Size = UDim2.new(1, -16, 0, 8)
+
+		progressFill = Instance.new("Frame", progressBar)
+		progressFill.BackgroundColor3 = theme.ListSelection
+		progressFill.BorderSizePixel = 0
+		progressFill.Size = UDim2.new(0, 0, 1, 0)
+
+		-- Options
+		optionsFrame = Instance.new("Frame", content)
+		optionsFrame.BackgroundTransparency = 1
+		optionsFrame.Position = UDim2.new(0, 8, 0, 48)
+		optionsFrame.Size = UDim2.new(1, -16, 0, 130)
+
+		local function makeCheckbox(yPos, label, optionKey)
+			local row = Instance.new("Frame", optionsFrame)
+			row.BackgroundTransparency = 1
+			row.Position = UDim2.new(0, 0, 0, yPos)
+			row.Size = UDim2.new(1, 0, 0, 22)
+
+			local box = Instance.new("TextButton", row)
+			box.BackgroundColor3 = theme.TextBox
+			box.BorderColor3 = theme.Outline3
+			box.Size = UDim2.new(0, 16, 0, 16)
+			box.Position = UDim2.new(0, 0, 0, 3)
+			box.Text = options[optionKey] and "X" or ""
+			box.TextColor3 = theme.Text
+			box.Font = Enum.Font.SourceSansBold
+			box.TextSize = 14
+
+			local txt = Instance.new("TextLabel", row)
+			txt.BackgroundTransparency = 1
+			txt.Position = UDim2.new(0, 22, 0, 0)
+			txt.Size = UDim2.new(1, -22, 1, 0)
+			txt.TextXAlignment = Enum.TextXAlignment.Left
+			txt.TextColor3 = theme.Text
+			txt.Font = Enum.Font.SourceSans
+			txt.TextSize = 14
+			txt.Text = label
+
+			box.MouseButton1Click:Connect(function()
+				options[optionKey] = not options[optionKey]
+				box.Text = options[optionKey] and "X" or ""
+			end)
+		end
+
+		-- Mode toggle (button)
+		local modeBtn = Instance.new("TextButton", optionsFrame)
+		modeBtn.BackgroundColor3 = theme.Button
+		modeBtn.BorderColor3 = theme.Outline2
+		modeBtn.Position = UDim2.new(0, 0, 0, 0)
+		modeBtn.Size = UDim2.new(1, 0, 0, 24)
+		modeBtn.TextColor3 = theme.Text
+		modeBtn.Font = Enum.Font.SourceSans
+		modeBtn.TextSize = 14
+		modeBtn.Text = "Mode: FULL (saveinstance + filters)"
+
+		modeBtn.MouseButton1Click:Connect(function()
+			if currentMode == "FULL" then
+				currentMode = "MANUAL"
+				modeBtn.Text = "Mode: MANUAL (walk + per-file)"
+			else
+				currentMode = "FULL"
+				modeBtn.Text = "Mode: FULL (saveinstance + filters)"
+			end
+		end)
+
+		makeCheckbox(32,  "Include OTHER players' GUIs/Backpacks", "IncludeOtherPlayers")
+		makeCheckbox(56,  "Include Roblox default character scripts", "IncludeDefaultScripts")
+		makeCheckbox(80,  "Decompile script source (manual mode)",   "DecompileScripts")
+		makeCheckbox(104, "Include nil-parented instances (manual)", "IncludeNilInstances")
+
+		-- Dump button
+		startButton = Instance.new("TextButton", content)
+		startButton.BackgroundColor3 = theme.Button
+		startButton.BorderColor3 = theme.Outline2
+		startButton.Position = UDim2.new(0, 8, 0, 186)
+		startButton.Size = UDim2.new(1, -16, 0, 28)
+		startButton.TextColor3 = theme.Text
+		startButton.Font = Enum.Font.SourceSansBold
+		startButton.TextSize = 16
+		startButton.Text = "Dump Game"
+
+		startButton.MouseButton1Click:Connect(function()
+			coroutine.wrap(GameDumper.Dump)()
+		end)
+
+		-- Log box
+		local logFrame = Instance.new("Frame", content)
+		logFrame.BackgroundColor3 = theme.Outline3
+		logFrame.BorderColor3 = theme.Outline1
+		logFrame.Position = UDim2.new(0, 8, 0, 222)
+		logFrame.Size = UDim2.new(1, -16, 1, -230)
+
+		logBox = Instance.new("TextLabel", logFrame)
+		logBox.BackgroundTransparency = 1
+		logBox.Size = UDim2.new(1, -4, 1, -4)
+		logBox.Position = UDim2.new(0, 2, 0, 2)
+		logBox.TextXAlignment = Enum.TextXAlignment.Left
+		logBox.TextYAlignment = Enum.TextYAlignment.Top
+		logBox.TextColor3 = theme.Text
+		logBox.Font = Enum.Font.Code
+		logBox.TextSize = 12
+		logBox.TextWrapped = true
+		logBox.Text = "[GameDumper] Ready.\nFiles will go to: dex/dumps/<PlaceId>_<UnixTime>/\n"
+	end
+
+	-- ============================================================
+	--  PROGRAMMATIC API (for other modules / console)
+	-- ============================================================
+
+	GameDumper.SetMode = function(mode)
+		if mode == "FULL" or mode == "MANUAL" then
+			currentMode = mode
+		end
+	end
+
+	GameDumper.SetOption = function(key, val)
+		if options[key] ~= nil then options[key] = val and true or false end
+	end
+
+	GameDumper.GetSkippedServices = function()
+		local copy = {}
+		for k,v in pairs(skippedServices) do copy[k] = v end
+		return copy
+	end
+
+	-- Allow callers to add/remove entries from the skip list at runtime
+	GameDumper.SkipService = function(name, skip)
+		skippedServices[name] = skip and true or false
+	end
+
+	return GameDumper
+end
+
+-- TODO: Remove when open source
+if gethsfuncs then
+	_G.moduleData = {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
+else
+	return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
+end
+
+end,
 ["Lib"] = function()
 --[[
 	Lib Module
@@ -6200,19 +6128,17 @@ local function main()
 
 					if input.UserInputType == Enum.UserInputType.MouseMovement then
 						resizer.BackgroundTransparency = 0.5
-					elseif input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+					elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
 						local releaseEvent,mouseEvent
 
-						local startX = (input.UserInputType == Enum.UserInputType.Touch) and input.Position.X or mouse.X
-						local startY = (input.UserInputType == Enum.UserInputType.Touch) and input.Position.Y or mouse.Y
-						local offX = startX - resizer.AbsolutePosition.X
-						local offY = startY - resizer.AbsolutePosition.Y
+						local offX = mouse.X - resizer.AbsolutePosition.X
+						local offY = mouse.Y - resizer.AbsolutePosition.Y
 
 						self.Resizing = resizer
 						resizer.BackgroundTransparency = 1
 
 						releaseEvent = service.UserInputService.InputEnded:Connect(function(input)
-							if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+							if input.UserInputType == Enum.UserInputType.MouseButton1 then
 								releaseEvent:Disconnect()
 								mouseEvent:Disconnect()
 								self.Resizing = false
@@ -6221,7 +6147,7 @@ local function main()
 						end)
 
 						mouseEvent = service.UserInputService.InputChanged:Connect(function(input)
-							if self.Resizable and self.ResizableInternal and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+							if self.Resizable and self.ResizableInternal and input.UserInputType == Enum.UserInputType.MouseMovement then
 								self:StopTweens()
 								local deltaX = input.Position.X - resizer.AbsolutePosition.X - offX
 								local deltaY = input.Position.Y - resizer.AbsolutePosition.Y - offY
@@ -6344,24 +6270,21 @@ local function main()
 			self.ContentPane = guiMain.Content
 
 			guiTopBar.InputBegan:Connect(function(input)
-				if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and self.Draggable then
+				if input.UserInputType == Enum.UserInputType.MouseButton1 and self.Draggable then
 					local releaseEvent,mouseEvent
 
 					local maxX = sidesGui.AbsoluteSize.X
 					local initX = guiMain.AbsolutePosition.X
 					local initY = guiMain.AbsolutePosition.Y
-					-- On touch, mouse.X/Y may be stale. Prefer the input's own start position.
-					local startX = (input.UserInputType == Enum.UserInputType.Touch) and input.Position.X or mouse.X
-					local startY = (input.UserInputType == Enum.UserInputType.Touch) and input.Position.Y or mouse.Y
-					local offX = startX - initX
-					local offY = startY - initY
+					local offX = mouse.X - initX
+					local offY = mouse.Y - initY
 
 					local alignInsertPos,alignInsertSide
 
 					guiDragging = true
 
 					releaseEvent = game:GetService("UserInputService").InputEnded:Connect(function(input)
-						if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+						if input.UserInputType == Enum.UserInputType.MouseButton1 then
 							releaseEvent:Disconnect()
 							mouseEvent:Disconnect()
 							guiDragging = false
@@ -6374,7 +6297,7 @@ local function main()
 					end)
 
 					mouseEvent = game:GetService("UserInputService").InputChanged:Connect(function(input)
-						if (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) and self.Draggable and not self.Closed then
+						if input.UserInputType == Enum.UserInputType.MouseMovement and self.Draggable and not self.Closed then
 							if self.Aligned then
 								if leftSide.Resizing or rightSide.Resizing then return end
 								local posX,posY = input.Position.X-offX,input.Position.Y-offY
@@ -6443,7 +6366,7 @@ local function main()
 			end)
 
 			guiMain.InputBegan:Connect(function(input)
-				if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and not self.Aligned and not self.Closed then
+				if input.UserInputType == Enum.UserInputType.MouseButton1 and not self.Aligned and not self.Closed then
 					moveToTop(self)
 				end
 			end)
@@ -6549,19 +6472,17 @@ local function main()
 				if not side.Resizing then
 					if input.UserInputType == Enum.UserInputType.MouseMovement then
 						resizer.BackgroundColor3 = theme.MainColor2
-					elseif input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+					elseif input.UserInputType == Enum.UserInputType.MouseButton1 then
 						local releaseEvent,mouseEvent
 
-						local startX = (input.UserInputType == Enum.UserInputType.Touch) and input.Position.X or mouse.X
-						local startY = (input.UserInputType == Enum.UserInputType.Touch) and input.Position.Y or mouse.Y
-						local offX = startX - resizer.AbsolutePosition.X
-						local offY = startY - resizer.AbsolutePosition.Y
+						local offX = mouse.X - resizer.AbsolutePosition.X
+						local offY = mouse.Y - resizer.AbsolutePosition.Y
 
 						side.Resizing = resizer
 						resizer.BackgroundColor3 = theme.MainColor2
 
 						releaseEvent = service.UserInputService.InputEnded:Connect(function(input)
-							if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+							if input.UserInputType == Enum.UserInputType.MouseButton1 then
 								releaseEvent:Disconnect()
 								mouseEvent:Disconnect()
 								side.Resizing = false
@@ -6576,7 +6497,7 @@ local function main()
 								side.Resizing = false
 								return
 							end
-							if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+							if input.UserInputType == Enum.UserInputType.MouseMovement then
 								if dir == "V" then
 									local delta = input.Position.Y - resizer.AbsolutePosition.Y - offY
 
@@ -10842,126 +10763,6 @@ else
 	return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
 end
 end,
-["ScriptViewer"] = function()
---[[
-	Script Viewer App Module
-	
-	A script viewer that is basically a notepad
-]]
-
--- Common Locals
-local Main,Lib,Apps,Settings -- Main Containers
-local Explorer, Properties, ScriptViewer, Notebook -- Major Apps
-local API,RMD,env,service,plr,create,createSimple -- Main Locals
-
-local function initDeps(data)
-	Main = data.Main
-	Lib = data.Lib
-	Apps = data.Apps
-	Settings = data.Settings
-
-	API = data.API
-	RMD = data.RMD
-	env = data.env
-	service = data.service
-	plr = data.plr
-	create = data.create
-	createSimple = data.createSimple
-end
-
-local function initAfterMain()
-	Explorer = Apps.Explorer
-	Properties = Apps.Properties
-	ScriptViewer = Apps.ScriptViewer
-	Notebook = Apps.Notebook
-end
-
-local function main()
-	local ScriptViewer = {}
-
-	local window,codeFrame
-
-	ScriptViewer.ViewScript = function(scr)
-		local s,source = pcall(env.decompile or function() end,scr)
-		if not s or not source then
-			source = "local test = 5\n\nlocal c = test + tick()\ngame.Workspace.Board:Destroy()\nstring.match('wow\\'f',\"yes\",3.4e-5,true)\ngame. Workspace.Wow\nfunction bar() print(54) end\n string . match() string 4 .match()"
-			source = source.."\n"..[==[
-			function a.sad() end
-			function a.b:sad() end
-			function 4.why() end
-			function a b() end
-			function string.match() end
-			function string.match.why() end
-			function local() end
-			function local.thing() end
-			string  . "sad" match
-			().magnitude = 3
-			a..b
-			a..b()
-			a...b
-			a...b()
-			a....b
-			a....b()
-			string..match()
-			string....match()
-			]==]
-		end
-
-		codeFrame:SetText(source)
-		window:Show()
-	end
-
-	ScriptViewer.Init = function()
-		window = Lib.Window.new()
-		window:SetTitle("Script Viewer")
-		window:Resize(500,400)
-		ScriptViewer.Window = window
-
-		codeFrame = Lib.CodeFrame.new()
-		codeFrame.Frame.Position = UDim2.new(0,0,0,20)
-		codeFrame.Frame.Size = UDim2.new(1,0,1,-20)
-		codeFrame.Frame.Parent = window.GuiElems.Content
-
-		-- TODO: REMOVE AND MAKE BETTER
-		local copy = Instance.new("TextButton",window.GuiElems.Content)
-		copy.BackgroundTransparency = 1
-		copy.Size = UDim2.new(0.5,0,0,20)
-		copy.Text = "Copy to Clipboard"
-		copy.TextColor3 = Color3.new(1,1,1)
-
-		copy.MouseButton1Click:Connect(function()
-			local source = codeFrame:GetText()
-			setclipboard(source)
-		end)
-
-		local save = Instance.new("TextButton",window.GuiElems.Content)
-		save.BackgroundTransparency = 1
-		save.Position = UDim2.new(0.5,0,0,0)
-		save.Size = UDim2.new(0.5,0,0,20)
-		save.Text = "Save to File"
-		save.TextColor3 = Color3.new(1,1,1)
-
-		save.MouseButton1Click:Connect(function()
-			local source = codeFrame:GetText()
-			local filename = "Place_"..game.PlaceId.."_Script_"..os.time()..".txt"
-
-			writefile(filename,source)
-			if movefileas then -- TODO: USE ENV
-				movefileas(filename,".txt")
-			end
-		end)
-	end
-
-	return ScriptViewer
-end
-
--- TODO: Remove when open source
-if gethsfuncs then
-	_G.moduleData = {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
-else
-	return {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
-end
-end,
 }
 --[[
 	New Dex
@@ -10979,7 +10780,7 @@ end,
 ]]
 
 -- Main vars
-local Main, Explorer, Properties, ScriptViewer, DefaultSettings, Notebook, Serializer, Lib, Dumper
+local Main, Explorer, Properties, ScriptViewer, DefaultSettings, Notebook, Serializer, Lib
 local API, RMD
 
 -- Default Settings
@@ -11096,7 +10897,7 @@ end
 Main = (function()
 	local Main = {}
 	
-	Main.ModuleList = {"Explorer","Properties","ScriptViewer","Dumper"}
+	Main.ModuleList = {"Explorer","Properties","ScriptViewer","GameDumper"}
 	Main.Elevated = false
 	Main.MissingEnv = {}
 	Main.Version = "Beta 1.0.0"
@@ -11104,7 +10905,7 @@ Main = (function()
 	Main.AppControls = {}
 	Main.Apps = Apps
 	Main.MenuApps = {}
-	Main.GitRepoName = "LorekeeperZinnia/Dex"
+	Main.GitRepoName = "peyton2465/Dex"
 	
 	Main.DisplayOrders = {
 		SideWindow = 8,
@@ -11133,7 +10934,7 @@ Main = (function()
 	Main.Error = function(str)
 		if rconsoleprint then
 			rconsoleprint("DEX ERROR: "..tostring(str).."\n")
-			wait(9e9)
+			coroutine.yield()
 		else
 			error(str)
 		end
@@ -11222,13 +11023,13 @@ Main = (function()
 		Properties = Apps.Properties
 		ScriptViewer = Apps.ScriptViewer
 		Notebook = Apps.Notebook
-		Dumper = Apps.Dumper
+		local GameDumper = Apps.GameDumper
 		local appTable = {
 			Explorer = Explorer,
 			Properties = Properties,
 			ScriptViewer = ScriptViewer,
 			Notebook = Notebook,
-			Dumper = Dumper
+			GameDumper = GameDumper
 		}
 		
 		Main.AppControls.Lib.InitAfterMain(appTable)
@@ -11957,7 +11758,7 @@ Main = (function()
 		
 		Main.CreateApp({Name = "Script Viewer", IconMap = Main.LargeIcons, Icon = "Script_Viewer", Window = ScriptViewer.Window})
 		
-		Main.CreateApp({Name = "Dump Game", IconMap = Main.LargeIcons, Icon = "Script_Viewer", Window = Dumper.Window})
+		Main.CreateApp({Name = "Game Dumper", Window = Apps.GameDumper.Window})
 		
 		Lib.ShowGui(gui)
 	end
@@ -12047,7 +11848,7 @@ Main = (function()
 		Explorer.Init()
 		Properties.Init()
 		ScriptViewer.Init()
-		Dumper.Init()
+		Apps.GameDumper.Init()
 		Lib.FastWait()
 		
 		-- Done
