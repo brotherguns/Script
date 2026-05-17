@@ -4589,7 +4589,7 @@ local function main()
 
 	local function dumpViaSaveInstance(outFolder)
 		if not env.saveinstance then
-			log("saveinstance() not available in this executor.")
+			log("saveinstance() not available in this executor. Use MANUAL mode.")
 			return false
 		end
 
@@ -4616,17 +4616,32 @@ local function main()
 			Decompile        = options.DecompileScripts,
 		}
 
-		local ok, err = pcall(function()
-			-- Different executors have different signatures. Try the rich one first,
-			-- fall back to the minimal one.
-			local s = pcall(env.saveinstance, filePath, saveOpts)
-			if not s then
-				env.saveinstance(filePath)
-			end
-		end)
+		-- Try the rich signature first. pcall ok = no error raised; we still
+		-- check whether the file was actually written (executors with no real
+		-- saveinstance sometimes return silently).
+		local ok = pcall(env.saveinstance, filePath, saveOpts)
+
+		-- If the rich call errored, try the minimal one
+		if not ok then
+			ok = pcall(env.saveinstance, filePath)
+		end
 
 		if not ok then
-			log("saveinstance() failed: " .. tostring(err))
+			log("saveinstance() raised an error on both signatures.")
+			return false
+		end
+
+		-- Verify the file actually exists (some executors stub saveinstance
+		-- as a no-op even though it returns without error). We probe via
+		-- readfile -- if it returns a non-empty string, the dump worked.
+		local wrote = false
+		local rOk, rData = pcall(env.readfile, filePath)
+		if rOk and type(rData) == "string" and #rData > 0 then
+			wrote = true
+		end
+
+		if not wrote then
+			log("saveinstance() ran but no file was produced. Falling back to MANUAL.")
 			return false
 		end
 
@@ -4669,26 +4684,51 @@ local function main()
 			end
 		end
 
+		-- decompile is unreliable on some executors (Delta times out after 15s,
+		-- others return empty strings, etc). Auto-disable after a few failures
+		-- so we don't waste hours stuck on broken scripts.
+		local decompileEnabled = options.DecompileScripts and (env.decompile ~= nil)
+		local decompileFails = 0
+		local decompileTried = 0
+		local DECOMPILE_FAIL_BUDGET = 3 -- give up after this many failures
+
 		-- Build a JSON-able tree as we go; also write each script as a file.
 		local function writeScript(scriptInst, fsPath)
 			local source
-			if options.DecompileScripts and env.decompile then
-				local ok, src = pcall(env.decompile, scriptInst)
-				if ok and src and src ~= "" then
-					source = src
-				end
-			end
-			if not source then
-				-- Try .Source directly (works for ModuleScripts on some executors)
-				local ok, src = pcall(function() return scriptInst.Source end)
-				if ok and type(src) == "string" and src ~= "" then
-					source = src
-				end
-			end
-			source = source or "-- (source unavailable)"
 
-			local ok, err = pcall(env.writefile, fsPath, source)
-			if ok then
+			-- 1) Try .Source directly first. Cheap and instant when it works
+			--    (some executors expose ModuleScript.Source).
+			local ok, src = pcall(function() return scriptInst.Source end)
+			if ok and type(src) == "string" and src ~= "" then
+				source = src
+			end
+
+			-- 2) Fall back to env.decompile if we still don't have source and
+			--    we haven't blown the failure budget yet.
+			if not source and decompileEnabled then
+				decompileTried = decompileTried + 1
+				local dOk, dSrc = pcall(env.decompile, scriptInst)
+				if dOk and type(dSrc) == "string" and dSrc ~= "" then
+					source = dSrc
+				else
+					decompileFails = decompileFails + 1
+					if decompileFails >= DECOMPILE_FAIL_BUDGET then
+						decompileEnabled = false
+						log(string.format(
+							"decompile failed %d/%d times; disabling for the rest of this dump.",
+							decompileFails, decompileTried))
+					end
+				end
+			end
+
+			if not source then
+				source = string.format(
+					"-- (source unavailable for %s '%s')\n",
+					safeGetClass(scriptInst), safeGetName(scriptInst))
+			end
+
+			local ok2, err = pcall(env.writefile, fsPath, source)
+			if ok2 then
 				dumpStats.scripts = dumpStats.scripts + 1
 			else
 				dumpStats.errors = dumpStats.errors + 1
@@ -4906,16 +4946,30 @@ local function main()
 		modeBtn.TextColor3 = theme.Text
 		modeBtn.Font = Enum.Font.SourceSans
 		modeBtn.TextSize = 14
-		modeBtn.Text = "Mode: FULL"
+
+		-- If saveinstance isn't available, default to MANUAL and label the
+		-- toggle accordingly so the user isn't confused why FULL silently
+		-- falls back every time.
+		local hasSaveInstance = env.saveinstance ~= nil
+		if not hasSaveInstance then
+			currentMode = "MANUAL"
+		end
+		local function refreshModeLabel()
+			if currentMode == "FULL" then
+				modeBtn.Text = hasSaveInstance and "Mode: FULL (saveinstance)" or "Mode: FULL (n/a - will use MANUAL)"
+			else
+				modeBtn.Text = "Mode: MANUAL (walk + per-file)"
+			end
+		end
+		refreshModeLabel()
 
 		modeBtn.MouseButton1Click:Connect(function()
 			if currentMode == "FULL" then
 				currentMode = "MANUAL"
-				modeBtn.Text = "Mode: MANUAL"
 			else
 				currentMode = "FULL"
-				modeBtn.Text = "Mode: FULL"
 			end
+			refreshModeLabel()
 		end)
 
 		local function makeCheckbox(yPos, label, optionKey)
