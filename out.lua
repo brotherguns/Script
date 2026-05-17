@@ -4658,7 +4658,14 @@ local function main()
 		setStatus("Walking game tree...")
 		setProgress(0)
 
-		dumpStats = { scripts = 0, instances = 0, skipped = 0, errors = 0 }
+		dumpStats = {
+			scripts        = 0,  -- script instances encountered
+			scriptsWithSrc = 0,  -- script files with real source
+			scriptsNoSrc   = 0,  -- script files we couldn't read (stubs)
+			instances      = 0,
+			skipped        = 0,
+			errors         = 0,
+		}
 
 		-- Top-level: iterate game's children, filter to services we care about
 		local roots = {}
@@ -4684,22 +4691,58 @@ local function main()
 			end
 		end
 
-		-- decompile is unreliable on some executors (Delta times out after 15s,
-		-- others return empty strings, etc). Auto-disable after a few failures
-		-- so we don't waste hours stuck on broken scripts.
+		-- decompile is unreliable on some executors (Delta times out after 15s
+		-- on some calls, OR — worse — returns an error sentinel string like
+		-- "-- failed to decompile script" / "-- failed to get script bytecode"
+		-- as if it were source. Auto-disable after a few failures so we don't
+		-- waste hours stuck on broken scripts.
 		local decompileEnabled = options.DecompileScripts and (env.decompile ~= nil)
 		local decompileFails = 0
 		local decompileTried = 0
-		local DECOMPILE_FAIL_BUDGET = 3 -- give up after this many failures
+		local DECOMPILE_FAIL_BUDGET = 5 -- give up after this many failures
+
+		-- Heuristic: does this string look like real script source, or just
+		-- an executor's "I couldn't decompile this" sentinel?
+		-- Real source has at least one non-comment, non-blank line.
+		local function looksLikeRealSource(s)
+			if type(s) ~= "string" or #s == 0 then return false end
+
+			-- Quick check for known sentinel phrases anywhere in the string
+			local lower = s:lower()
+			if lower:find("failed to decompile", 1, true)
+				or lower:find("failed to get script", 1, true)
+				or lower:find("could not decompile", 1, true)
+				or lower:find("cannot decompile", 1, true)
+				or lower:find("decompile failed", 1, true)
+				or lower:find("error decompiling", 1, true)
+				or lower:find("decompiler error", 1, true)
+				or lower:find("decompiler timed out", 1, true)
+			then
+				return false
+			end
+
+			-- Strip comments and whitespace; if nothing's left, it's a sentinel
+			-- (or an empty script, but we treat both as "no source").
+			local stripped = s
+				:gsub("%-%-%[%[.-%]%]", "")  -- block comments
+				:gsub("%-%-[^\n]*", "")      -- line comments
+				:gsub("%s+", "")             -- whitespace
+			if #stripped == 0 then return false end
+
+			return true
+		end
 
 		-- Build a JSON-able tree as we go; also write each script as a file.
 		local function writeScript(scriptInst, fsPath)
+			dumpStats.scripts = dumpStats.scripts + 1
 			local source
 
 			-- 1) Try .Source directly first. Cheap and instant when it works
-			--    (some executors expose ModuleScript.Source).
+			--    (some executors expose ModuleScript.Source via getscriptable
+			--    or similar). On Delta this raises a security error for
+			--    Scripts/LocalScripts so it'll just fail through.
 			local ok, src = pcall(function() return scriptInst.Source end)
-			if ok and type(src) == "string" and src ~= "" then
+			if ok and looksLikeRealSource(src) then
 				source = src
 			end
 
@@ -4708,31 +4751,36 @@ local function main()
 			if not source and decompileEnabled then
 				decompileTried = decompileTried + 1
 				local dOk, dSrc = pcall(env.decompile, scriptInst)
-				if dOk and type(dSrc) == "string" and dSrc ~= "" then
+				if dOk and looksLikeRealSource(dSrc) then
 					source = dSrc
 				else
 					decompileFails = decompileFails + 1
 					if decompileFails >= DECOMPILE_FAIL_BUDGET then
 						decompileEnabled = false
 						log(string.format(
-							"decompile failed %d/%d times; disabling for the rest of this dump.",
+							"decompile returned no usable source %d/%d times; "
+							.. "disabling decompile for the rest of this dump. "
+							.. "Remaining scripts will only have name/class metadata.",
 							decompileFails, decompileTried))
 					end
 				end
 			end
 
-			if not source then
-				source = string.format(
-					"-- (source unavailable for %s '%s')\n",
-					safeGetClass(scriptInst), safeGetName(scriptInst))
-			end
-
-			local ok2, err = pcall(env.writefile, fsPath, source)
-			if ok2 then
-				dumpStats.scripts = dumpStats.scripts + 1
+			if source then
+				dumpStats.scriptsWithSrc = dumpStats.scriptsWithSrc + 1
+				local ok2, err = pcall(env.writefile, fsPath, source)
+				if not ok2 then
+					dumpStats.errors = dumpStats.errors + 1
+					log("Failed to write " .. fsPath .. ": " .. tostring(err))
+					return false
+				end
+				return true
 			else
-				dumpStats.errors = dumpStats.errors + 1
-				log("Failed to write " .. fsPath .. ": " .. tostring(err))
+				-- Source unavailable. Don't pollute the output folder with
+				-- hundreds of identical stub files - the script still gets a
+				-- node in tree.json so its existence is recorded.
+				dumpStats.scriptsNoSrc = dumpStats.scriptsNoSrc + 1
+				return false
 			end
 		end
 
@@ -4760,8 +4808,12 @@ local function main()
 					or (className == "ModuleScript" and ".module.lua")
 					or ".server.lua"
 				local fsPath = fsParent.path .. "/" .. fileBase .. ext
-				writeScript(inst, fsPath)
-				node.file = fileBase .. ext
+				local wrote = writeScript(inst, fsPath)
+				if wrote then
+					node.file = fileBase .. ext
+				else
+					node.sourceUnavailable = true
+				end
 			end
 
 			-- Descend (only if it has children worth descending into)
@@ -4827,14 +4879,31 @@ local function main()
 		end
 
 		-- Write a summary
+		local executor = "<unknown>"
+		if Main and Main.Executor then executor = tostring(Main.Executor) end
 		local summary = string.format(
-			"Game Dump Summary\n=================\nPlaceId:   %d\nJobId:     %s\nMode:      MANUAL\nTime:      %s\n\nInstances walked: %d\nScripts written:  %d\nSkipped:          %d\nErrors:           %d\n",
+			"Game Dump Summary\n"
+			.. "=================\n"
+			.. "PlaceId:   %d\n"
+			.. "JobId:     %s\n"
+			.. "Executor:  %s\n"
+			.. "Mode:      MANUAL\n"
+			.. "Time:      %s\n\n"
+			.. "Instances walked:        %d\n"
+			.. "Skipped (filtered):      %d\n"
+			.. "Scripts found:           %d\n"
+			.. "  - With source dumped:  %d\n"
+			.. "  - Source unavailable:  %d\n"
+			.. "Errors writing files:    %d\n",
 			game.PlaceId,
 			tostring(game.JobId),
+			executor,
 			os.date("%Y-%m-%d %H:%M:%S"),
 			dumpStats.instances,
-			dumpStats.scripts,
 			dumpStats.skipped,
+			dumpStats.scripts,
+			dumpStats.scriptsWithSrc,
+			dumpStats.scriptsNoSrc,
 			dumpStats.errors
 		)
 		pcall(env.writefile, outFolder .. "/summary.txt", summary)
