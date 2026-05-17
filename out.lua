@@ -4456,9 +4456,15 @@ local function main()
 	local function log(msg)
 		if logBox and logBox.Parent then
 			logBox.Text = logBox.Text .. tostring(msg) .. "\n"
-			-- Auto-scroll
+			-- Auto-scroll the parent if it's a ScrollingFrame
 			pcall(function()
-				logBox.CanvasPosition = Vector2.new(0, math.huge)
+				local p = logBox.Parent
+				if p and p:IsA("ScrollingFrame") then
+					-- Grow canvas to fit text, then scroll to bottom
+					local bounds = logBox.TextBounds
+					p.CanvasSize = UDim2.new(0, 0, 0, bounds.Y + 8)
+					p.CanvasPosition = Vector2.new(0, math.huge)
+				end
 			end)
 		end
 		print("[GameDumper]", msg)
@@ -4851,7 +4857,10 @@ local function main()
 	GameDumper.Init = function()
 		window = Lib.Window.new()
 		window:SetTitle("Game Dumper")
-		window:Resize(420, 360)
+
+		-- Pick a size that works well on both desktop and small/mobile viewports.
+		-- We let the window auto-resize via Show({Align=...}) later.
+		window:Resize(340, 380)
 		GameDumper.Window = window
 
 		local content = window.GuiElems.Content
@@ -4860,20 +4869,21 @@ local function main()
 		-- Status label
 		statusLabel = Instance.new("TextLabel", content)
 		statusLabel.BackgroundTransparency = 1
-		statusLabel.Position = UDim2.new(0, 8, 0, 8)
-		statusLabel.Size = UDim2.new(1, -16, 0, 20)
+		statusLabel.Position = UDim2.new(0, 8, 0, 6)
+		statusLabel.Size = UDim2.new(1, -16, 0, 18)
 		statusLabel.TextColor3 = theme.Text
 		statusLabel.TextXAlignment = Enum.TextXAlignment.Left
 		statusLabel.Font = Enum.Font.SourceSans
 		statusLabel.TextSize = 14
-		statusLabel.Text = "Idle. Configure options below and click Dump."
+		statusLabel.TextTruncate = Enum.TextTruncate.AtEnd
+		statusLabel.Text = "Idle. Configure & tap Dump."
 
 		-- Progress bar
 		progressBar = Instance.new("Frame", content)
 		progressBar.BackgroundColor3 = theme.Outline3
 		progressBar.BorderSizePixel = 0
-		progressBar.Position = UDim2.new(0, 8, 0, 32)
-		progressBar.Size = UDim2.new(1, -16, 0, 8)
+		progressBar.Position = UDim2.new(0, 8, 0, 26)
+		progressBar.Size = UDim2.new(1, -16, 0, 6)
 
 		progressFill = Instance.new("Frame", progressBar)
 		progressFill.BackgroundColor3 = theme.ListSelection
@@ -4883,73 +4893,82 @@ local function main()
 		-- Options
 		optionsFrame = Instance.new("Frame", content)
 		optionsFrame.BackgroundTransparency = 1
-		optionsFrame.Position = UDim2.new(0, 8, 0, 48)
-		optionsFrame.Size = UDim2.new(1, -16, 0, 130)
+		optionsFrame.Position = UDim2.new(0, 8, 0, 38)
+		optionsFrame.Size = UDim2.new(1, -16, 0, 156)
 
-		local function makeCheckbox(yPos, label, optionKey)
-			local row = Instance.new("Frame", optionsFrame)
-			row.BackgroundTransparency = 1
-			row.Position = UDim2.new(0, 0, 0, yPos)
-			row.Size = UDim2.new(1, 0, 0, 22)
-
-			local box = Instance.new("TextButton", row)
-			box.BackgroundColor3 = theme.TextBox
-			box.BorderColor3 = theme.Outline3
-			box.Size = UDim2.new(0, 16, 0, 16)
-			box.Position = UDim2.new(0, 0, 0, 3)
-			box.Text = options[optionKey] and "X" or ""
-			box.TextColor3 = theme.Text
-			box.Font = Enum.Font.SourceSansBold
-			box.TextSize = 14
-
-			local txt = Instance.new("TextLabel", row)
-			txt.BackgroundTransparency = 1
-			txt.Position = UDim2.new(0, 22, 0, 0)
-			txt.Size = UDim2.new(1, -22, 1, 0)
-			txt.TextXAlignment = Enum.TextXAlignment.Left
-			txt.TextColor3 = theme.Text
-			txt.Font = Enum.Font.SourceSans
-			txt.TextSize = 14
-			txt.Text = label
-
-			box.MouseButton1Click:Connect(function()
-				options[optionKey] = not options[optionKey]
-				box.Text = options[optionKey] and "X" or ""
-			end)
-		end
-
-		-- Mode toggle (button)
+		-- Mode toggle (button) - larger for touch
 		local modeBtn = Instance.new("TextButton", optionsFrame)
 		modeBtn.BackgroundColor3 = theme.Button
 		modeBtn.BorderColor3 = theme.Outline2
+		modeBtn.AutoButtonColor = false
 		modeBtn.Position = UDim2.new(0, 0, 0, 0)
-		modeBtn.Size = UDim2.new(1, 0, 0, 24)
+		modeBtn.Size = UDim2.new(1, 0, 0, 28)
 		modeBtn.TextColor3 = theme.Text
 		modeBtn.Font = Enum.Font.SourceSans
 		modeBtn.TextSize = 14
-		modeBtn.Text = "Mode: FULL (saveinstance + filters)"
+		modeBtn.Text = "Mode: FULL"
 
 		modeBtn.MouseButton1Click:Connect(function()
 			if currentMode == "FULL" then
 				currentMode = "MANUAL"
-				modeBtn.Text = "Mode: MANUAL (walk + per-file)"
+				modeBtn.Text = "Mode: MANUAL"
 			else
 				currentMode = "FULL"
-				modeBtn.Text = "Mode: FULL (saveinstance + filters)"
+				modeBtn.Text = "Mode: FULL"
 			end
 		end)
 
-		makeCheckbox(32,  "Include OTHER players' GUIs/Backpacks", "IncludeOtherPlayers")
-		makeCheckbox(56,  "Include Roblox default character scripts", "IncludeDefaultScripts")
-		makeCheckbox(80,  "Decompile script source (manual mode)",   "DecompileScripts")
-		makeCheckbox(104, "Include nil-parented instances (manual)", "IncludeNilInstances")
+		local function makeCheckbox(yPos, label, optionKey)
+			local row = Instance.new("TextButton", optionsFrame)
+			row.BackgroundTransparency = 1
+			row.AutoButtonColor = false
+			row.Text = ""
+			row.Position = UDim2.new(0, 0, 0, yPos)
+			row.Size = UDim2.new(1, 0, 0, 28) -- bigger touch target
 
-		-- Dump button
+			local box = Instance.new("Frame", row)
+			box.BackgroundColor3 = theme.TextBox
+			box.BorderColor3 = theme.Outline3
+			box.Size = UDim2.new(0, 18, 0, 18)
+			box.Position = UDim2.new(0, 0, 0.5, -9)
+
+			local check = Instance.new("TextLabel", box)
+			check.BackgroundTransparency = 1
+			check.Size = UDim2.new(1, 0, 1, 0)
+			check.TextColor3 = theme.Text
+			check.Font = Enum.Font.SourceSansBold
+			check.TextSize = 14
+			check.Text = options[optionKey] and "X" or ""
+
+			local txt = Instance.new("TextLabel", row)
+			txt.BackgroundTransparency = 1
+			txt.Position = UDim2.new(0, 26, 0, 0)
+			txt.Size = UDim2.new(1, -26, 1, 0)
+			txt.TextXAlignment = Enum.TextXAlignment.Left
+			txt.TextColor3 = theme.Text
+			txt.Font = Enum.Font.SourceSans
+			txt.TextSize = 14
+			txt.TextTruncate = Enum.TextTruncate.AtEnd
+			txt.Text = label
+
+			row.MouseButton1Click:Connect(function()
+				options[optionKey] = not options[optionKey]
+				check.Text = options[optionKey] and "X" or ""
+			end)
+		end
+
+		makeCheckbox(32,  "Include OTHER players' stuff",        "IncludeOtherPlayers")
+		makeCheckbox(62,  "Include Roblox default scripts",      "IncludeDefaultScripts")
+		makeCheckbox(92,  "Decompile scripts (manual mode)",     "DecompileScripts")
+		makeCheckbox(122, "Include nil-parented instances",      "IncludeNilInstances")
+
+		-- Dump button (bigger for touch)
 		startButton = Instance.new("TextButton", content)
-		startButton.BackgroundColor3 = theme.Button
+		startButton.BackgroundColor3 = theme.ListSelection
 		startButton.BorderColor3 = theme.Outline2
-		startButton.Position = UDim2.new(0, 8, 0, 186)
-		startButton.Size = UDim2.new(1, -16, 0, 28)
+		startButton.AutoButtonColor = false
+		startButton.Position = UDim2.new(0, 8, 0, 200)
+		startButton.Size = UDim2.new(1, -16, 0, 32)
 		startButton.TextColor3 = theme.Text
 		startButton.Font = Enum.Font.SourceSansBold
 		startButton.TextSize = 16
@@ -4959,24 +4978,51 @@ local function main()
 			coroutine.wrap(GameDumper.Dump)()
 		end)
 
-		-- Log box
-		local logFrame = Instance.new("Frame", content)
+		-- Log box: a proper ScrollingFrame holding a TextLabel sized to its text
+		local logFrame = Instance.new("ScrollingFrame", content)
 		logFrame.BackgroundColor3 = theme.Outline3
 		logFrame.BorderColor3 = theme.Outline1
-		logFrame.Position = UDim2.new(0, 8, 0, 222)
-		logFrame.Size = UDim2.new(1, -16, 1, -230)
+		logFrame.Position = UDim2.new(0, 8, 0, 240)
+		logFrame.Size = UDim2.new(1, -16, 1, -248)
+		logFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+		logFrame.ScrollBarThickness = 6
+		logFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+		logFrame.ScrollBarImageColor3 = theme.Outline2
+		logFrame.Active = true -- needed for touch scroll
+		logFrame.BorderSizePixel = 1
 
 		logBox = Instance.new("TextLabel", logFrame)
 		logBox.BackgroundTransparency = 1
-		logBox.Size = UDim2.new(1, -4, 1, -4)
-		logBox.Position = UDim2.new(0, 2, 0, 2)
+		logBox.Position = UDim2.new(0, 4, 0, 2)
+		logBox.Size = UDim2.new(1, -10, 0, 0)
+		logBox.AutomaticSize = Enum.AutomaticSize.Y
 		logBox.TextXAlignment = Enum.TextXAlignment.Left
 		logBox.TextYAlignment = Enum.TextYAlignment.Top
 		logBox.TextColor3 = theme.Text
 		logBox.Font = Enum.Font.Code
 		logBox.TextSize = 12
 		logBox.TextWrapped = true
-		logBox.Text = "[GameDumper] Ready.\nFiles will go to: dex/dumps/<PlaceId>_<UnixTime>/\n"
+		logBox.Text = "[GameDumper] Ready.\nOutput: dex/dumps/<PlaceId>_<Time>/\n"
+
+		-- ----------------------------------------------------------
+		-- Mobile / small-viewport friendliness:
+		-- Override Show() so that when the menu app button calls
+		-- window:Show() with no args, we default to aligning on the
+		-- right side instead of opening free-floating at 0,0 (which
+		-- on phones lands under the status bar and is impossible to
+		-- drag back). If the caller already passed an alignment, we
+		-- respect their args and just forward.
+		-- ----------------------------------------------------------
+		local origShow = window.Show
+		window.Show = function(self, data)
+			if not data or not data.Align then
+				data = data or {}
+				data.Align = "right"
+				data.Pos = data.Pos or 3
+				data.Size = data.Size or 0.33
+			end
+			return origShow(self, data)
+		end
 	end
 
 	-- ============================================================
@@ -11758,7 +11804,9 @@ Main = (function()
 		
 		Main.CreateApp({Name = "Script Viewer", IconMap = Main.LargeIcons, Icon = "Script_Viewer", Window = ScriptViewer.Window})
 		
-		Main.CreateApp({Name = "Game Dumper", Window = Apps.GameDumper.Window})
+		if Apps.GameDumper and Apps.GameDumper.Window then
+			Main.CreateApp({Name = "Game Dumper", Window = Apps.GameDumper.Window})
+		end
 		
 		Lib.ShowGui(gui)
 	end
@@ -11848,7 +11896,8 @@ Main = (function()
 		Explorer.Init()
 		Properties.Init()
 		ScriptViewer.Init()
-		Apps.GameDumper.Init()
+		local gdOk, gdErr = pcall(Apps.GameDumper.Init)
+		if not gdOk then warn("[GameDumper] Init failed: "..tostring(gdErr)) end
 		Lib.FastWait()
 		
 		-- Done
